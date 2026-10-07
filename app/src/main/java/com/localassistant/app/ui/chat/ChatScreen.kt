@@ -1,0 +1,1310 @@
+package com.localassistant.app.ui.chat
+
+import android.content.Context.CLIPBOARD_SERVICE
+import android.content.Intent
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioManager
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Send
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import android.widget.Toast
+import com.localassistant.app.R
+import com.localassistant.app.ui.common.exportChatToJsonFile
+import com.localassistant.app.ui.common.exportChatToTextFile
+import com.localassistant.app.ui.common.formatRelativeTime
+import com.localassistant.app.ui.common.loadPinnedMessages
+import com.localassistant.app.ui.common.playTTSAudio
+import com.localassistant.app.ui.common.recordAudioWithVAD
+import com.localassistant.app.ui.common.shareMessage
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/**
+ * Maximum number of messages to keep in the conversation before summarization triggers.
+ */
+private const val SUMMARY_THRESHOLD = 50
+
+/**
+ * Main chat screen with voice controls.
+ *
+ * Displays conversation history and provides voice interaction controls.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ChatScreen(
+    onNavigateToSettings: () -> Unit,
+    hasPermissions: Boolean = true,
+    viewModel: ChatViewModel = viewModel()
+) {
+    val messages by viewModel.messages.collectAsState()
+    val serviceState by viewModel.serviceState.collectAsState()
+    val settings by viewModel.settings.collectAsState()
+    
+    android.util.Log.d("ChatScreen", "Composed with ${messages.size} messages")
+
+    var textInput by remember { mutableStateOf("") }
+    var searchQuery by remember { mutableStateOf("") }
+    val isSendingText by viewModel.isSendingText.collectAsState()
+    val streamingContent = viewModel.streamingContent.collectAsState()
+    val streamingReasoning = viewModel.streamingReasoning.collectAsState()
+    var isRecording by remember { mutableStateOf(false) }
+    var showMenu by remember { mutableStateOf(false) }
+    var menuExpanded by remember { mutableStateOf(false) }
+    var lastAssistantMessage by remember { mutableStateOf<String?>(null) }
+    var isTtsPlaying by remember { mutableStateOf(false) }
+    var recordedAudioBytes by remember { mutableStateOf<ByteArray?>(null) }
+    var isRecordingActive by remember { mutableStateOf(false) }
+    val recordingStopSignal = java.util.concurrent.atomic.AtomicBoolean(false)
+    val coroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val lazyListState = rememberLazyListState()
+
+    // Auto-scroll to bottom when new messages or streaming content arrives
+    var ttsPlayedMessageIndex by remember { mutableIntStateOf(-1) }
+
+    LaunchedEffect(messages.size, streamingContent.value, streamingReasoning.value) {
+        val totalItems = lazyListState.layoutInfo.totalItemsCount
+        val isStreaming = streamingContent.value.isNotEmpty() || streamingReasoning.value.isNotEmpty()
+        // Auto-scroll to the bottom while the AI is responding, and whenever the
+        // user is already near the bottom (so we don't yank them away from history).
+        if (totalItems > 0 && (isStreaming || lazyListState.isNearBottom())) {
+            lazyListState.animateScrollToItem(totalItems - 1)
+        }
+
+        // Track last assistant message for auto-TTS - only trigger when streaming is COMPLETE
+        val lastMsg = messages.lastOrNull { it.role == com.localassistant.app.domain.model.MessageRole.ASSISTANT }
+        if (lastMsg != null && lastMsg.content.isNotBlank() && streamingContent.value.isEmpty() && settings.autoTtsEnabled) {
+            val lastIdx = messages.indexOf(lastMsg)
+            if (lastIdx != ttsPlayedMessageIndex && lastMsg.content != lastAssistantMessage) {
+                lastAssistantMessage = lastMsg.content
+                coroutineScope.launch {
+                    android.util.Log.d("ChatScreen", "Auto-playing TTS for completed message: ${lastMsg.content.take(50)}")
+                    playTTSAudio(
+                        lastMsg.content,
+                        Pair(settings.ttsBaseUrl, if (settings.ttsApiKey.isBlank()) null else settings.ttsApiKey),
+                        model = settings.ttsModelName,
+                        voice = settings.ttsVoiceName,
+                        responseFormat = settings.ttsResponseFormat,
+                        enableStreaming = settings.enableTtsStreaming
+                    )
+                    ttsPlayedMessageIndex = lastIdx
+                }
+            }
+        }
+    }
+
+    // Pinned messages state - loaded from SharedPreferences on first composition
+    var pinnedMessages by remember { mutableStateOf<List<com.localassistant.app.domain.model.ChatMessage>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        pinnedMessages = loadPinnedMessages(context.applicationContext)
+    }
+
+    // Conversation summarization state - trigger when message count exceeds threshold
+    var showSummarizedNotification by remember { mutableStateOf(false) }
+    var lastMessageCount by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(messages.size) {
+        if (messages.size > SUMMARY_THRESHOLD && messages.size != lastMessageCount) {
+            // Only trigger once when crossing the threshold
+            if (messages.size == SUMMARY_THRESHOLD + 1) {
+                android.util.Log.d("ChatScreen", "Conversation exceeded $SUMMARY_THRESHOLD messages, summarizing...")
+                showSummarizedNotification = true
+                viewModel.maybeSummarizeConversation(
+                    llmBaseUrl = settings?.llmBaseUrl,
+                    apiKey = if (settings!!.llmApiKey.isBlank()) null else settings!!.llmApiKey,
+                    model = settings?.llmModelName
+                )
+            }
+            lastMessageCount = messages.size
+        }
+    }
+
+    // Track previous state to detect changes and play audio feedback tones
+    var prevState by remember { mutableStateOf<String?>(null) }
+    val currentState = serviceState.toString()
+
+    LaunchedEffect(currentState) {
+        if (prevState != currentState && currentState in listOf("listening", "processing", "speaking")) {
+            // Play a short beep using AudioTrack - no external resources needed
+            try {
+                val audioManager = context.getSystemService(AudioManager::class.java)
+                val maxVol = audioManager?.getStreamMaxVolume(AudioManager.STREAM_MUSIC) ?: 15
+                val curVol = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: (maxVol / 2)
+                val volumeLevel = if (maxVol > 0) curVol.toFloat() / maxVol else 0.5f
+
+                // Generate beep tone data (800Hz, 100ms at 16kHz)
+                val sampleRate = 16000
+                val numSamples = (sampleRate * 0.1).toInt()
+                val buffer = ShortArray(numSamples)
+                for (i in 0 until numSamples) {
+                    val t = i.toFloat() / sampleRate
+                    val amplitude = Math.sin(2.0 * Math.PI * 800.0 * t.toDouble()) * volumeLevel * Short.MAX_VALUE.toDouble()
+                    buffer[i] = amplitude.toInt().coerceIn(-Short.MAX_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+                }
+
+                var audioTrack: android.media.AudioTrack? = null
+                val rates = listOf(16000, 22050, 24000, 8000)
+                
+                for (rate in rates) {
+                    try {
+                        val minBufferSize = android.media.AudioTrack.getMinBufferSize(
+                            rate,
+                            AudioFormat.CHANNEL_OUT_MONO,
+                            AudioFormat.ENCODING_PCM_16BIT
+                        )
+                        
+                        if (minBufferSize <= 0 || minBufferSize > numSamples * 2) continue
+                        
+                        audioTrack = android.media.AudioTrack(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .build(),
+                            AudioFormat.Builder()
+                                .setSampleRate(rate)
+                                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                .build(),
+                            minBufferSize,
+                            android.media.AudioTrack.MODE_STREAM,
+                            0
+                        )
+                        
+                        if (audioTrack?.state != android.media.AudioTrack.STATE_INITIALIZED) {
+                            audioTrack?.release()
+                            audioTrack = null
+                            continue
+                        }
+                        
+                        audioTrack.write(buffer, 0, numSamples)
+                        audioTrack.play()
+                        Thread.sleep(120L)
+                        audioTrack.stop()
+                        audioTrack.release()
+                        break
+                    } catch (e: Exception) {
+                        try { audioTrack?.release() } catch (_: Exception) {}
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("ChatScreen", "Audio feedback failed: ${e.message}")
+            }
+        }
+        prevState = currentState
+    }
+
+    if (!hasPermissions) {
+        PermissionDeniedScreen()
+    } else {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text(context.getString(R.string.app_name)) },
+                    actions = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { searchQuery = "" }) {
+                                Icon(Icons.Default.Close, contentDescription = context.getString(R.string.chat_clear_search))
+                            }
+                        }
+                        
+                        // Hamburger menu button with DropdownMenu
+                        Box {
+                            IconButton(onClick = { menuExpanded = true }) {
+                                Icon(
+                                    imageVector = Icons.Default.Menu,
+                                    contentDescription = "Menu",
+                                    tint = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            
+                            DropdownMenu(
+                                expanded = menuExpanded,
+                                onDismissRequest = { menuExpanded = false }
+                            ) {
+                                // Auto TTS toggle - controls whether completed assistant
+                                // messages are spoken aloud automatically
+                                DropdownMenuItem(
+                                    text = { Text("Auto TTS") },
+                                    trailingIcon = {
+                                        androidx.compose.material3.Switch(
+                                            checked = settings.autoTtsEnabled,
+                                            onCheckedChange = { enabled ->
+                                                viewModel.updateSettings(settings.copy(autoTtsEnabled = enabled))
+                                            }
+                                        )
+                                    },
+                                    onClick = { menuExpanded = false }
+                                )
+
+                                // Reasoning auto-expand toggle
+                                DropdownMenuItem(
+                                    text = { Text("Auto-expand reasoning") },
+                                    trailingIcon = {
+                                        androidx.compose.material3.Switch(
+                                            checked = settings.autoExpandReasoning,
+                                            onCheckedChange = { enabled ->
+                                                viewModel.updateSettings(settings.copy(autoExpandReasoning = enabled))
+                                            }
+                                        )
+                                    },
+                                    onClick = { menuExpanded = false }
+                                )
+                                
+                                Divider()
+                                
+                                // Clear history
+                                DropdownMenuItem(
+                                    text = { Text("Clear History") },
+                                    onClick = { 
+                                        viewModel.clearHistory()
+                                        menuExpanded = false
+                                    }
+                                )
+                                
+                                // Settings
+                                DropdownMenuItem(
+                                    text = { Text("Settings") },
+                                    onClick = { 
+                                        onNavigateToSettings()
+                                        menuExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                        
+                        val ctx = LocalContext.current
+                        val versionName by remember { derivedStateOf { runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() } }
+                        if (versionName != null) {
+                            Text(
+                                text = "v$versionName",
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.align(Alignment.CenterVertically).padding(end = 8.dp)
+                            )
+                        }
+                    }
+                )
+            },
+            bottomBar = {
+                VoiceControlsBar(
+                    serviceState = serviceState,
+                    isSendingText = isSendingText,
+                    textInput = textInput,
+                    onTextInputChange = { textInput = it },
+                    onSendText = { text ->
+                        if (text.isNotBlank() && settings != null) {
+                            viewModel.sendMessage(
+                                text,
+                                settings!!.llmBaseUrl,
+                                if (settings!!.llmApiKey.isBlank()) null else settings!!.llmApiKey,
+                                settings!!.llmModelName
+                            )
+                            textInput = ""
+                        }
+                    },
+                    isRecording = isRecording,
+                    onStartRecording = {
+                        isRecording = true
+                        recordedAudioBytes = null
+                        recordingStopSignal.set(false)
+                        
+                        if (settings == null) {
+                            Toast.makeText(context.applicationContext, "Please configure settings first", Toast.LENGTH_LONG).show()
+                            isRecording = false
+                            return@VoiceControlsBar
+                        }
+                        
+                        coroutineScope.launch {
+                            try {
+                                viewModel.setServiceState("listening")
+                                
+                                val wavBytes = withContext(Dispatchers.IO) {
+                                    recordAudioWithVAD(context.applicationContext, recordingStopSignal)
+                                }
+                                
+                                if (wavBytes == null || wavBytes.isEmpty()) {
+                                    Toast.makeText(context.applicationContext, "Failed to record audio", Toast.LENGTH_SHORT).show()
+                                    isRecording = false
+                                    return@launch
+                                }
+                                
+                                recordedAudioBytes = wavBytes
+                                
+                                                                 // Automatically process the recording after VAD stops
+                                coroutineScope.launch {
+                                    try {
+                                        viewModel.setServiceState("processing")
+
+                                        val transcribedText = withContext(Dispatchers.IO) {
+                                            com.localassistant.app.data.remote.ApiClient.transcribeAudio(
+                                                baseUrl = settings.sttBaseUrl,
+                                                apiKey = if (settings.sttApiKey.isBlank()) null else settings.sttApiKey,
+                                                audioData = wavBytes,
+                                                model = settings.sttModelName
+                                            )
+                                        }
+
+                                        isRecording = false
+
+                                        if (transcribedText.isNotBlank()) {
+                                            android.util.Log.d("ChatScreen", "STT result: $transcribedText")
+                                            viewModel.addMessage(com.localassistant.app.domain.model.MessageRole.USER, transcribedText)
+
+                                            var fullResponse = StringBuilder()
+                                            var reasoningContent = StringBuilder()
+
+                                            withContext(Dispatchers.IO) {
+                                                // Include the full conversation history for context
+                                                val history = viewModel.messages.value.map { msg ->
+                                                    mapOf("role" to msg.role.name.lowercase(), "content" to msg.content)
+                                                }
+
+                                                com.localassistant.app.data.remote.ApiClient.chatCompletion(
+                                                    baseUrl = settings.llmBaseUrl,
+                                                    apiKey = if (settings.llmApiKey.isBlank()) null else settings.llmApiKey,
+                                                    messages = history,
+                                                    model = settings.llmModelName,
+                                                    stream = true,
+                                                    systemPrompt = settings.systemPrompt
+                                                ) { chunk: String ->
+                                                    if (chunk.startsWith("\u0001")) {
+                                                        reasoningContent.append(chunk.substring(1))
+                                                        viewModel.updateStreamingReasoning(reasoningContent.toString())
+                                                    } else {
+                                                        fullResponse.append(chunk)
+                                                        viewModel.updateStreamingContent(fullResponse.toString())
+                                                    }
+                                                }
+                                            }
+
+                                            val finalText = fullResponse.toString().trim()
+                                            val reasoningText = reasoningContent.toString().trim()
+                                            android.util.Log.d("ChatScreen", "Voice LLM response: ${finalText.length} chars, reasoning: ${reasoningText.length} chars")
+
+                                            withContext(Dispatchers.Main) {
+                                                if (finalText.isNotEmpty()) {
+                                                    viewModel.addMessage(
+                                                        com.localassistant.app.domain.model.MessageRole.ASSISTANT,
+                                                        finalText,
+                                                        if (reasoningText.isNotEmpty()) reasoningText else null
+                                                    )
+                                                } else {
+                                                    Toast.makeText(context, "No response from LLM", Toast.LENGTH_SHORT).show()
+                                                }
+                                                // Clear streaming state AFTER the final message is added
+                                                viewModel.updateStreamingContent("")
+                                                if (reasoningText.isNotEmpty()) {
+                                                    viewModel.updateStreamingReasoning("")
+                                                }
+                                                viewModel.setServiceState("idle")
+                                            }
+                                        } else {
+                                            withContext(Dispatchers.Main) {
+                                                viewModel.setServiceState("idle")
+                                                Toast.makeText(context.applicationContext, "Could not understand speech", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    } catch (e: Exception) {
+                                        withContext(Dispatchers.Main) {
+                                            viewModel.setServiceState("idle")
+                                            isRecording = false
+                                            android.util.Log.e("ChatScreen", "Voice interaction failed", e)
+                                            Toast.makeText(context.applicationContext, "Error: ${e.message}", Toast.LENGTH_LONG).show()
+                                        }
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                viewModel.setServiceState("idle")
+                                isRecording = false
+                                Toast.makeText(context.applicationContext, "Recording failed: ${e.message}", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    },
+                    onStopRecording = {
+                        android.util.Log.d("ChatScreen", "Manual stop recording requested")
+                        if (!isRecording) {
+                            android.util.Log.w("ChatScreen", "Stop called but not recording!")
+                            return@VoiceControlsBar
+                        }
+                        recordingStopSignal.set(true)
+                    },
+                )
+            }
+        ) { padding ->
+            Column(
+                modifier = Modifier.fillMaxSize().padding(padding),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // Search bar
+                if (messages.isNotEmpty()) {
+                    OutlinedTextField(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(top = 8.dp),
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        placeholder = { Text(context.getString(R.string.chat_search_placeholder)) },
+                        trailingIcon = {
+                            if (searchQuery.isNotEmpty()) {
+                                IconButton(onClick = { searchQuery = "" }) {
+                                    Icon(Icons.Default.Close, contentDescription = "Clear")
+                                }
+                            }
+                        },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+
+                if (messages.isEmpty()) {
+                    Spacer(modifier = Modifier.weight(1f))
+                    Box(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = null,
+                                modifier = Modifier.size(64.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "Tap the microphone to start",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.weight(1f))
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val filteredMessages = if (searchQuery.isBlank()) {
+                            messages
+                        } else {
+                            messages.filter { it.content.contains(searchQuery, ignoreCase = true) }
+                        }
+
+                        // Export buttons row
+                        item {
+                            val exportContext = LocalContext.current
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = { exportChatToTextFile(exportContext, messages) },
+                                    modifier = Modifier.weight(1f),
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)
+                                ) {
+                                    Text(context.getString(R.string.chat_export_button))
+                                }
+                                Button(
+                                    onClick = { exportChatToJsonFile(exportContext, messages) },
+                                    modifier = Modifier.weight(1f),
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+                                ) {
+                                    Text("📤 Export JSON")
+                                }
+                            }
+                        }
+
+                        // Show pinned messages at the top
+                        if (pinnedMessages.isNotEmpty()) {
+                            item {
+                                Text(
+                                    text = context.getString(R.string.chat_pinned_messages),
+                                    style = MaterialTheme.typography.titleMedium,
+                                    modifier = Modifier.padding(vertical = 8.dp)
+                                )
+                            }
+                            for (message in pinnedMessages) {
+                                item(key = "pinned_${message.id}") {
+                                    MessageBubble(
+                                        message = message,
+                                        isPinned = true,
+                                        ttsSettings = Pair(settings?.ttsBaseUrl, if (settings?.ttsApiKey.isNullOrEmpty()) null else settings.ttsApiKey),
+                                        ttsModel = settings?.ttsModelName ?: "piper-en",
+                                        ttsVoice = settings?.ttsVoiceName ?: "en_US-ryan-high",
+                                        ttsResponseFormat = settings?.ttsResponseFormat ?: "mp3",
+                                        autoExpandReasoning = settings?.autoExpandReasoning ?: true,
+                                        onUnpin = {
+                                            viewModel.unpinMessage(message.id)
+                                            pinnedMessages = loadPinnedMessages(context.applicationContext)
+                                        }
+                                    )
+                                }
+                                item { Spacer(modifier = Modifier.height(8.dp)) }
+                            }
+                        }
+
+                        // Show summarization notification when conversation is summarized
+                        if (showSummarizedNotification) {
+                            item {
+                                Card(
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                                    ),
+                                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.Center,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "💬 Conversation summarized (older messages archived)",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onTertiaryContainer
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        TextButton(onClick = { showSummarizedNotification = false }) {
+                                            Text("Dismiss")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if (filteredMessages.isEmpty() && searchQuery.isNotBlank()) {
+                            item {
+                                Text(
+                                    text = "No messages match \"$searchQuery\"",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                )
+                            }
+                        } else {
+                            itemsIndexed(filteredMessages) { _, message ->
+                                MessageBubble(
+                                    message = message,
+                                    isPinned = false,
+                                    ttsSettings = Pair(settings?.ttsBaseUrl, if (settings?.ttsApiKey.isNullOrEmpty()) null else settings.ttsApiKey),
+                                    ttsModel = settings?.ttsModelName ?: "piper-en",
+                                    ttsVoice = settings?.ttsVoiceName ?: "en_US-ryan-high",
+                                    ttsResponseFormat = settings?.ttsResponseFormat ?: "mp3",
+                                    autoExpandReasoning = settings?.autoExpandReasoning ?: true,
+                                    onPin = {
+                                        viewModel.pinMessage(message)
+                                        pinnedMessages = loadPinnedMessages(context.applicationContext)
+                                    }
+                                )
+                            }
+
+                            // Show streaming response in progress.
+                            // During streaming the last stored message is the USER message
+                            // (the assistant message is only appended after streaming completes),
+                            // so the indicator must show while streaming content exists and
+                            // the last message is NOT an assistant message.
+                            val lastMsg = messages.lastOrNull()
+                            val isStreaming = (streamingContent.value.isNotEmpty() || streamingReasoning.value.isNotEmpty()) &&
+                                lastMsg?.role != com.localassistant.app.domain.model.MessageRole.ASSISTANT
+                            if (isStreaming && searchQuery.isBlank()) {
+                                item {
+                                    StreamingResponseIndicator(
+                                        content = streamingContent.value,
+                                        reasoningContent = streamingReasoning.value,
+                                        ttsSettings = Pair(settings?.ttsBaseUrl, if (settings?.ttsApiKey.isNullOrEmpty()) null else settings.ttsApiKey)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+
+
+
+
+
+/**
+ * Screen shown when required permissions are denied.
+ */
+@Composable
+private fun PermissionDeniedScreen() {
+    val ctx = LocalContext.current
+    Column(
+        modifier = Modifier.fillMaxSize().padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            imageVector = Icons.Default.Mic,
+            contentDescription = null,
+            modifier = Modifier.size(64.dp),
+            tint = MaterialTheme.colorScheme.error
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            text = ctx.getString(R.string.permission_required_title),
+            style = MaterialTheme.typography.headlineSmall,
+            color = MaterialTheme.colorScheme.error
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = ctx.getString(R.string.permission_required_message),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.height(24.dp))
+        Text(
+            text = ctx.getString(R.string.permission_grant_instruction),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+
+
+
+
+
+
+
+
+/**
+ * Display a single chat message as a bubble.
+ * Supports long-press to copy message text to clipboard and pin/unpin messages.
+ *
+ * @param message The chat message to display
+ * @param isPinned Whether this message is pinned at the top of the chat
+ * @param onPin Callback when user wants to pin this message (only used when !isPinned)
+ * @param onUnpin Callback when user wants to unpin this message (only used when isPinned)
+ */
+@Composable
+internal fun MessageBubble(
+    message: com.localassistant.app.domain.model.ChatMessage,
+    isPinned: Boolean = false,
+    ttsSettings: Pair<String?, String?>? = null, // (baseUrl, apiKey)
+    ttsModel: String = "piper-en",
+    ttsVoice: String = "en_US-ryan-high",
+    ttsResponseFormat: String = "mp3",
+    autoExpandReasoning: Boolean = true,
+    onPin: (() -> Unit)? = null,
+    onUnpin: (() -> Unit)? = null
+) {
+    val isUser = message.role == com.localassistant.app.domain.model.MessageRole.USER
+    val context = LocalContext.current
+    var showMessageActions by remember { mutableStateOf(false) }
+
+    if (showMessageActions) {
+        MessageActionBottomSheet(
+            onDismiss = { showMessageActions = false },
+            onCopy = {
+                val clipboard = context.getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                val clip = android.content.ClipData.newPlainText("message", message.content)
+                clipboard.setPrimaryClip(clip)
+                showMessageActions = false
+            },
+            onShare = {
+                shareMessage(context, message.content)
+                showMessageActions = false
+            },
+            onPinOrUnpin = {
+                if (isPinned && onUnpin != null) {
+                    onUnpin()
+                } else if (!isPinned && onPin != null) {
+                    onPin()
+                }
+                showMessageActions = false
+            },
+            isPinned = isPinned
+        )
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth()
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onTap = {},
+                    onLongPress = {
+                        showMessageActions = true
+                    }
+                )
+            },
+        colors = CardDefaults.cardColors(
+            containerColor = if (isUser)
+                MaterialTheme.colorScheme.primaryContainer
+            else
+                MaterialTheme.colorScheme.surfaceVariant
+        ),
+        elevation = CardDefaults.cardElevation(
+            defaultElevation = if (isPinned) 4.dp else 2.dp
+        )
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            // Pinned header row with pin/unpin button
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (isPinned) "📌 Pinned" else "",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Row {
+                    if (isPinned && onUnpin != null) {
+                        TextButton(
+                            onClick = { onUnpin() },
+                            content = { Text("Unpin", style = MaterialTheme.typography.bodySmall) }
+                        )
+                    } else if (!isPinned && onPin != null) {
+                        TextButton(
+                            onClick = { onPin() },
+                            content = { Text("📌 Pin", style = MaterialTheme.typography.bodySmall) }
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // Reasoning/thinking section (collapsible) - only for assistant messages with reasoning
+            if (!isUser && message.reasoningContent != null && message.reasoningContent.isNotBlank()) {
+                var isReasoningExpanded by remember { mutableStateOf(autoExpandReasoning) }
+                
+                Card(
+                    modifier = Modifier.fillMaxWidth()
+                        .clickable { isReasoningExpanded = !isReasoningExpanded }
+                        .padding(vertical = 4.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                ) {
+                    Column(modifier = Modifier.padding(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (isReasoningExpanded) "▾ Hide thinking" else "▸ Show thinking",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.secondary
+                            )
+                            Icon(
+                                imageVector = if (isReasoningExpanded) 
+                                    Icons.Default.ExpandLess 
+                                else 
+                                    Icons.Default.ExpandMore,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.secondary
+                            )
+                        }
+                        
+                        if (isReasoningExpanded) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = message.reasoningContent,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Read aloud button - only show for assistant messages
+            var isReadingAloud by remember { mutableStateOf(false) }
+            val coroutineScope = rememberCoroutineScope()
+            if (!isUser && !isReadingAloud && ttsSettings != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = message.content,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    IconButton(
+                        onClick = {
+                            isReadingAloud = true
+                            coroutineScope.launch {
+                                android.util.Log.d("ChatScreen", "Read aloud: ${message.content}")
+                                try {
+                                    playTTSAudio(
+                                        message.content,
+                                        ttsSettings,
+                                        model = ttsModel,
+                                        voice = ttsVoice,
+                                        responseFormat = ttsResponseFormat
+                                    )
+                                } catch (e: Exception) {
+                                    android.util.Log.e("ChatScreen", "TTS playback failed: ${e.message}")
+                                }
+                                isReadingAloud = false
+                            }
+                        },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                            contentDescription = "Read aloud",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            } else if (!isUser && isReadingAloud) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = message.content,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp
+                    )
+                }
+            } else {
+                Text(
+                    text = message.content,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = formatRelativeTime(message.timestamp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/**
+ * Display a streaming assistant response as it arrives.
+ * Shows live typing indicator with real-time text updates.
+ */
+@Composable
+internal fun StreamingResponseIndicator(
+    content: String,
+    reasoningContent: String = "",
+    ttsSettings: Pair<String?, String?>? = null
+) {
+    var isExpanded by remember { mutableStateOf(false) }
+    var isReasoningExpanded by remember { mutableStateOf(true) }
+    
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "Assistant is typing...",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                
+                if (ttsSettings != null) {
+                    IconButton(
+                        onClick = { isExpanded = !isExpanded },
+                        modifier = Modifier.size(20.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.VolumeUp,
+                            contentDescription = "Read aloud",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+            
+            Spacer(modifier = Modifier.height(4.dp))
+            
+            // Show reasoning/thinking content if available (expandable)
+            if (reasoningContent.isNotEmpty()) {
+                Card(
+                    modifier = Modifier.fillMaxWidth()
+                        .clickable { isReasoningExpanded = !isReasoningExpanded }
+                        .padding(vertical = 4.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+                ) {
+                    Column(modifier = Modifier.padding(8.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (isReasoningExpanded) "▾ Thinking..." else "▸ Show thinking...",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.secondary
+                            )
+                            Icon(
+                                imageVector = if (isReasoningExpanded) 
+                                    Icons.Default.ExpandLess 
+                                else 
+                                    Icons.Default.ExpandMore,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.secondary
+                            )
+                        }
+                        
+                        if (isReasoningExpanded) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = reasoningContent,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+            
+            Text(
+                text = content,
+                style = MaterialTheme.typography.bodyMedium
+            )
+        }
+    }
+}
+
+/**
+ * Clean bottom bar with voice controls and text input.
+ */
+@Composable
+private fun VoiceControlsBar(
+    serviceState: String,
+    isSendingText: Boolean = false,
+    textInput: String = "",
+    onTextInputChange: (String) -> Unit = {},
+    onSendText: (String) -> Unit,
+    isRecording: Boolean = false,
+    onStartRecording: () -> Unit = {},
+    onStopRecording: () -> Unit = {}
+) {
+
+    Surface(
+        modifier = Modifier.fillMaxWidth().imePadding(),
+        tonalElevation = 4.dp
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            // Status row - clean and simple
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = when (serviceState) {
+                        "listening" -> "Listening..."
+                        "processing" -> "Thinking..."
+                        "speaking" -> "Speaking..."
+                        else -> ""
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                
+                if (isRecording) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier.size(8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(10.dp),
+                                strokeWidth = 1.5.dp,
+                                color = MaterialTheme.colorScheme.error,
+                                progress = 1f
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "Recording",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                } else if (serviceState == "processing") {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(12.dp),
+                        strokeWidth = 1.5.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                        progress = 0.7f
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Input row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    modifier = Modifier.weight(1f),
+                    value = textInput,
+                    onValueChange = onTextInputChange,
+                    placeholder = { Text("Message", style = MaterialTheme.typography.bodyMedium) },
+                    singleLine = true,
+                    maxLines = 1,
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(24),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MaterialTheme.colorScheme.primary,
+                        unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant
+                    )
+                )
+
+                // Send button
+                if (textInput.isNotBlank()) {
+                    IconButton(
+                        onClick = { onSendText(textInput) },
+                        enabled = !isSendingText,
+                        modifier = Modifier.size(40.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Send,
+                            contentDescription = "Send",
+                            tint = if (isSendingText) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+
+                // Mic button - press to start, press again to stop and send
+                val micBackgroundColor = if (isRecording) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.primaryContainer
+                }
+
+                IconButton(
+                    onClick = {
+                        if (!isRecording) {
+                            onStartRecording()
+                        } else {
+                            onStopRecording()
+                        }
+                    },
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Mic,
+                        contentDescription = if (isRecording) "Stop recording" else "Start recording",
+                        tint = if (isRecording) MaterialTheme.colorScheme.onError else MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+/**
+ * Bottom sheet shown when user long-presses a message.
+ * Provides options to copy, share, or pin/unpin the message.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MessageActionBottomSheet(
+    onDismiss: () -> Unit,
+    onCopy: () -> Unit,
+    onShare: () -> Unit,
+    onPinOrUnpin: () -> Unit,
+    isPinned: Boolean
+) {
+    var visible by remember { mutableStateOf(true) }
+
+    if (visible) {
+        ModalBottomSheet(
+            onDismissRequest = {
+                visible = false
+                onDismiss()
+            },
+            dragHandle = {
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant
+                )
+            }
+        ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Copy option
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = { onCopy(); visible = false })
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.ContentCopy,
+                        contentDescription = null,
+                        modifier = Modifier.size(24.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(
+                        text = "Copy",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                }
+
+                HorizontalDivider()
+
+                // Share option
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = { onShare(); visible = false })
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Share,
+                        contentDescription = null,
+                        modifier = Modifier.size(24.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(
+                        text = "Share",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                }
+
+                HorizontalDivider()
+
+                // Pin/Unpin option
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = { onPinOrUnpin(); visible = false })
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PushPin,
+                        contentDescription = null,
+                        modifier = Modifier.size(24.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(
+                        text = if (isPinned) "Unpin" else "Pin",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                }
+
+                // Dismiss row at bottom
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = { visible = false })
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Cancel",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Returns true when the list is scrolled to (or very near) the bottom, i.e. the
+ * last item is visible or the second-to-last item is fully in view.
+ */
+private fun androidx.compose.foundation.lazy.LazyListState.isNearBottom(): Boolean {
+    val layout = layoutInfo
+    if (layout.totalItemsCount == 0) return true
+    // Consider "near the bottom" when the last visible item is within the last
+    // two items of the list.
+    val lastVisibleIndex = layout.visibleItemsInfo.last().index
+    return lastVisibleIndex >= layout.totalItemsCount - 2
+}
+        

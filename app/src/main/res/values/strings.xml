@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App Name -->
+    <string name="app_name">Local Assistant</string>
+
+    <!-- Service Notification -->
+    <string name="notification_channel_name">Voice Assistant</string>
+    <string name="notification_channel_description">Local AI Voice Assistant - Always listening mode</string>
+    <string name="notification_title">Local Assistant</string>
+    <string name="notification_listening">Listening...</string>
+    <string name="notification_processing">Processing...</string>
+    <string name="notification_speaking">Speaking...</string>
+    <string name="notification_idle">Assistant idle</string>
+
+    <!-- Chat Screen -->
+    <string name="chat_placeholder">Tap the microphone to start</string>
+    <string name="chat_ready">Ready</string>
+    <string name="chat_listening">Listening...</string>
+    <string name="chat_processing">Thinking...</string>
+    <string name="chat_speaking">Speaking...</string>
+
+    <!-- Voice Controls -->
+    <string name="voice_control_start">Start listening</string>
+    <string name="voice_control_stop">Stop listening</string>
+
+    <!-- Settings Screen -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_llm_config">LLM Configuration</string>
+    <string name="settings_stt_config">Speech-to-Text (STT)</string>
+    <string name="settings_tts_config">Text-to-Speech (TTS)</string>
+    <string name="settings_system_prompt">System Prompt</string>
+    <string name="settings_wake_word">Wake Word</string>
+    <string name="settings_vad">Voice Activity Detection</string>
+    <string name="settings_service_controls">Service Controls</string>
+    <string name="settings_danger_zone">Danger Zone</string>
+
+    <!-- LLM Settings -->
+    <string name="setting_base_url">Base URL</string>
+    <string name="setting_model_name">Model Name</string>
+    <string name="setting_api_key">API Key (optional)</string>
+    <string name="setting_system_prompt_label">Prompt</string>
+
+    <!-- STT Settings -->
+    <string name="stt_placeholder">http://192.168.1.100:8080/v1</string>
+    <string name="whisper_model">whisper-large-v3</string>
+
+    <!-- TTS Settings -->
+    <string name="tts_placeholder">http://192.168.1.100:5001/v1</string>
+    <string name="piper_voice">en_US-ryan-high</string>
+
+    <!-- Wake Word Settings -->
+    <string name="wake_word_phrase">Wake Word Phrase</string>
+    <string name="wake_word_placeholder">hey assistant</string>
+    <string name="sensitivity_label">Sensitivity: %.2f</string>
+
+    <!-- Service Controls -->
+    <string name="enable_foreground_service">Enable Foreground Service</string>
+    <string name="continuous_conversation_mode">Continuous Conversation Mode</string>
+    <string name="auto_start_on_boot">Auto Start on Boot</string>
+
+    <!-- Danger Zone -->
+    <string name="reset_settings">Reset All Settings to Defaults</string>
+
+    <!-- Permissions -->
+    <string name="permission_microphone">Microphone access is required for voice recognition</string>
+    <string name="permission_notification">Notifications are needed for the always-listening service</string>
+    <string name="permission_rationale">Local Assistant needs microphone access to listen for your wake word and commands. All processing happens locally on your device.</string>
+
+    <!-- Error Messages -->
+    <string name="error_audio_init">Failed to initialize audio recorder</string>
+    <string name="error_network">Network error - check your local endpoints</string>
+    <string name="error_no_internet">No internet connection available</string>
+    <string name="error_service_not_running">Voice assistant service is not running</string>
+
+    <!-- Help Text -->
+    <string name="help_llm_url">Enter the base URL of your local LLM endpoint (e.g., http://192.168.1.100:8080/v1)</string>
+    <string name="help_stt_url">Enter the base URL of your local STT endpoint</string>
+    <string name="help_tts_url">Enter the base URL of your local TTS endpoint</string>
+    <string name="help_wake_word">The phrase that activates the assistant (e.g., hey assistant, computer, jarvis)</string>
+
+    <!-- Widget Strings -->
+    <string name="voice_assistant">Voice Assistant</string>
+    <string name="voice_assistant_tap_to_activate">Tap to activate</string>
+    <string name="voice_assistant_active">Assistant active</string>
+    <string name="widget_app_update">com.localassistant.app.WIDGET_UPDATE</string>
+
+    <!-- Chat Screen UI Strings -->
+    <string name="chat_settings_button">\u2699\ufe0f Settings</string>
+    <string name="chat_search_placeholder">\ud83d\udd0d Search messages...</string>
+    <string name="chat_clear_search">Clear search</string>
+    <string name="chat_export_button">\ud83d\udcda Export Chat</string>
+    <string name="chat_pinned_messages">\ud83d\udccc Pinned Messages</string>
+    <string name="chat_no_match">No messages match "%s"</string>
+    <string name="chat_summarized_notification">\ud83d\udcac Conversation summarized (older messages archived)</string>
+    <string name="chat_dismiss">Dismiss</string>
+
+    <!-- Settings Screen UI Strings -->
+    <string name="settings_back_button">\u2190 Back</string>
+    <string name="settings_clear_data_title">\ud83d\uddd1\ufe0f Clear All Data</string>
+    <string name="settings_clear_data_message">This will reset all settings to defaults AND delete any stored data including chat history. This action cannot be undone.</string>
+    <string name="settings_clear_data_confirm">Clear All Data</string>
+    <string name="settings_cancel">Cancel</string>
+    <string name="settings_factory_reset_title">\u26a0\ufe0f Reset to Factory Defaults</string>
+    <string name="settings_confirm_intent">\ud83d\udd12 Confirm Intent</string>
+    <string name="settings_reset_button">\ud83d\udd13 RESET</string>
+    <string name="settings_save_preset_title">\ud83d\udcbe Save Preset</string>
+    <string name="settings_save_preset_message">Save current settings as a named preset for quick loading later.</string>
+    <string name="settings_preset_placeholder">e.g., Home, Office, Car</string>
+    <string name="settings_save_button">Save</string>
+
+    <!-- Advanced Settings Strings -->
+    <string name="settings_advanced_title">\ud83d\udd12 Advanced Settings</string>
+    <string name="settings_advanced_show">Show</string>
+    <string name="settings_advanced_hide">Hide</string>
+    <string name="setting_debug_logging">Enable Debug Logging</string>
+    <string name="setting_debug_logging_description">Logs all API requests and responses to logcat for troubleshooting.</string>
+    <string name="setting_http_timeout">HTTP Timeout: %ds</string>
+    <string name="setting_force_https">Force HTTPS</string>
+    <string name="setting_force_https_description">Rejects all non-HTTPS connections for security. May break local development.</string>
+
+    <!-- Localization Strings -->
+    <string name="settings_preferred_language">Preferred Language</string>
+    <string name="language_system_default">System Default</string>
+    <string name="language_en">English</string>
+    <string name="language_es">Espa\u00f1ol</string>
+    <string name="language_fr">Fran\u00e7ais</string>
+    <string name="language_de">Deutsch</string>
+    <string name="language_zh">\u4e2d\u6587</string>
+
+    <!-- Permission Screen Strings -->
+    <string name="permission_required_title">Permissions Required</string>
+    <string name="permission_required_message">This app needs microphone and notification permissions to function. Please grant them in settings.</string>
+    <string name="permission_grant_instruction">Please grant permissions in Settings to use this app.</string>
+
+    <!-- Loading Screen -->
+    <string name="loading_text">Loading...</string>
+</resources>

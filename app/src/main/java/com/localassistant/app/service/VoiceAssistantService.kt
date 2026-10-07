@@ -1,0 +1,1059 @@
+package com.localassistant.app.service
+
+import android.Manifest
+import android.app.*
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.os.Build.VERSION
+import android.os.Build.VERSION_CODES
+import android.os.IBinder
+import android.os.PowerManager
+import androidx.annotation.RequiresPermission
+import androidx.core.app.NotificationCompat
+import com.localassistant.app.LocalAssistantApplication
+import com.localassistant.app.data.remote.ApiClient
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+
+/**
+ * Foreground service that handles the complete voice assistant pipeline:
+ * 1. Audio capture with noise suppression
+ * 2. Speech recognition via local STT endpoint  
+ * 3. LLM chat completion
+ * 4. TTS audio playback via AudioTrack
+ * 
+ * Runs continuously in the background with a persistent notification.
+ */
+class VoiceAssistantService : Service() {
+
+    companion object Constants {
+        const val NOTIFICATION_ID = 1001
+        const val CHANNEL_ID = "voice_assistant_channel"
+        
+        // Action constants for service commands
+        const val ACTION_START = "com.localassistant.START"
+        const val ACTION_STOP = "com.localassistant.STOP"
+        const val ACTION_PAUSE = "com.localassistant.PAUSE"
+        const val ACTION_RESUME = "com.localassistant.RESUME"
+        
+        // Service states
+        const val STATE_IDLE = "idle"
+        const val STATE_LISTENING = "listening"
+        const val STATE_PROCESSING = "processing"
+        const val STATE_SPEAKING = "speaking"
+        const val STATE_ERROR = "error"
+        
+        // Retry configuration for API calls
+        private const val MAX_RETRIES = 3
+        private const val RETRY_DELAY_MS = 1000L
+        
+        /**
+         * Build an intent for this service with the given action.
+         */
+        fun buildIntent(context: android.content.Context, action: String): Intent {
+            return Intent(context, VoiceAssistantService::class.java).apply {
+                this.action = action
+            }
+        }
+    }
+
+    // Service state management - exposed as StateFlow for UI observation
+    private val _state = MutableStateFlow(STATE_IDLE)
+    val state: StateFlow<String> = _state.asStateFlow()
+    
+    private val _currentMessage = MutableStateFlow("")
+    val currentMessage: StateFlow<String> = _currentMessage.asStateFlow()
+    
+    // Audio level for notification indicator (0-100)
+    @Volatile
+    private var currentAudioLevel = 0
+
+    // Audio recording configuration (16kHz, mono, 16-bit PCM)
+    private var sampleRate = 16000
+    private var channelConfig = AudioFormat.CHANNEL_IN_MONO
+    private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
+    
+    // Energy-saving mode state
+    @Volatile
+    private var energySavingMode = false
+    
+    // VAD (Voice Activity Detection) configuration - loaded from settings on start
+    private var vadSensitivity: Float = 0.4f
+    private var vadMinSilenceDurationMs: Long = 800L
+    
+    // Settings repository for dynamic configuration
+    private val settingsRepository by lazy {
+        com.localassistant.app.data.settings.SettingsRepository(
+            LocalAssistantApplication.getInstance().applicationContext
+        )
+    }
+    
+    // Coroutine scope for background tasks
+    private val serviceScope = CoroutineScope(Dispatchers.Default + Job())
+    
+    // Audio recording
+    private var audioRecord: AudioRecord? = null
+    private var recordingThread: Thread? = null
+    
+    // Buffer overflow protection
+    @Volatile
+    private var framesDroppedCount = 0
+    private val maxPendingFrames = 5  // Max frames to wait for processing before dropping old ones
+    
+    // Audio playback
+    private var audioTrack: android.media.AudioTrack? = null
+    
+    // TTS speech queue - FIFO queue for pending speech text
+    private val ttsSpeechQueue = java.util.concurrent.ConcurrentLinkedQueue<String>()
+    @Volatile
+    private var isTtsPlaying = false
+    
+    // Notification manager
+    private lateinit var notificationManager: NotificationManager
+
+    override fun onCreate() {
+        super.onCreate()
+        notificationManager = getSystemService(NotificationManager::class.java)
+        
+        createNotificationChannel()
+        requestBatteryOptimizationExemption()
+        startForeground(NOTIFICATION_ID, buildNotification(STATE_IDLE))
+        
+        // Register battery receiver for energy-saving mode
+        try {
+            val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
+            registerReceiver(batteryReceiver, filter)
+            checkBatteryLevel() // Check immediately on start
+        } catch (e: Exception) {
+            android.util.Log.w("VoiceAssistantService", "Failed to register battery receiver: ${e.message}")
+        }
+    }
+
+    /**
+     * Request battery optimization exemption so the service isn't killed by Doze mode.
+     */
+    private fun requestBatteryOptimizationExemption() {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (VERSION.SDK_INT >= VERSION_CODES.M) {
+                // Use reflection to check battery optimization status
+                val method = pm.javaClass.getMethod("isIgnoringBatteryOptimations", String::class.java)
+                val isExempted = method.invoke(pm, packageName) as Boolean
+                
+                if (!isExempted) {
+                    android.util.Log.d("VoiceAssistantService", "Battery optimization not exempted. Requesting exemption...")
+                    try {
+                        val requestIntent = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                            data = android.net.Uri.parse("package:$packageName")
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        startActivity(requestIntent)
+                    } catch (e: Exception) {
+                        android.util.Log.w("VoiceAssistantService", "Could not launch battery optimization settings: ${e.message}")
+                    }
+                } else {
+                    android.util.Log.d("VoiceAssistantService", "Already exempted from battery optimizations")
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("VoiceAssistantService", "Battery optimization check failed: ${e.message}")
+        }
+    }
+
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_START -> startListening()
+            ACTION_STOP -> stopListening()
+            ACTION_PAUSE -> pauseService()
+            ACTION_RESUME -> resumeService()
+        }
+        
+        return START_STICKY
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    /**
+     * Validate that the device supports the required audio configuration.
+     * If not supported, log warnings and fall back to lower quality settings.
+     */
+    private fun validateAudioConfiguration() {
+        val originalSampleRate = 16000
+        val originalChannelConfig = AudioFormat.CHANNEL_IN_MONO
+        
+        // Check if the preferred sample rate is supported
+        var minBufferSize = AudioRecord.getMinBufferSize(
+            originalSampleRate, originalChannelConfig, audioFormat
+        )
+        
+        if (minBufferSize == AudioRecord.ERROR_BAD_VALUE || minBufferSize == AudioRecord.ERROR) {
+            android.util.Log.w("VoiceAssistantService", "Preferred sample rate ${originalSampleRate}Hz not supported. Falling back...")
+            
+            // Try 11kHz as fallback
+            minBufferSize = AudioRecord.getMinBufferSize(
+                11025, originalChannelConfig, audioFormat
+            )
+            if (minBufferSize > 0) {
+                sampleRate = 11025
+                android.util.Log.w("VoiceAssistantService", "Falling back to 11kHz sample rate")
+            } else {
+                // Try 8kHz as last resort
+                minBufferSize = AudioRecord.getMinBufferSize(
+                    8000, originalChannelConfig, audioFormat
+                )
+                if (minBufferSize > 0) {
+                    sampleRate = 8000
+                    android.util.Log.w("VoiceAssistantService", "Falling back to 8kHz sample rate")
+                } else {
+                    android.util.Log.e("VoiceAssistantService", "No supported sample rate found for mono PCM")
+                    // Try stereo as last resort with original sample rate
+                    minBufferSize = AudioRecord.getMinBufferSize(
+                        originalSampleRate, AudioFormat.CHANNEL_IN_STEREO, audioFormat
+                    )
+                    if (minBufferSize > 0) {
+                        channelConfig = AudioFormat.CHANNEL_IN_STEREO
+                        android.util.Log.w("VoiceAssistantService", "Falling back to stereo configuration")
+                    } else {
+                        throw RuntimeException("No supported audio configuration found")
+                    }
+                }
+            }
+        }
+        
+        // Check if channel config is supported at preferred sample rate
+        if (sampleRate == originalSampleRate && channelConfig == AudioFormat.CHANNEL_IN_MONO) {
+            minBufferSize = AudioRecord.getMinBufferSize(
+                sampleRate, AudioFormat.CHANNEL_IN_STEREO, audioFormat
+            )
+            if (minBufferSize > 0) {
+                // Stereo works but mono didn't - this shouldn't happen, but handle gracefully
+                android.util.Log.w("VoiceAssistantService", "Mono not supported at ${sampleRate}Hz, using stereo")
+                channelConfig = AudioFormat.CHANNEL_IN_STEREO
+            }
+        }
+    }
+
+    // ==================== Lifecycle Methods ====================
+
+    /**
+     * Start the voice assistant pipeline.
+     */
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    private fun startListening() {
+        if (_state.value == STATE_IDLE) {
+            _state.value = STATE_LISTENING
+            
+            // Load VAD settings from repository before starting
+            try {
+                val currentSettings = settingsRepository.loadSettings()
+                vadSensitivity = currentSettings.vadSensitivity
+                vadMinSilenceDurationMs = currentSettings.vadMinSilenceDurationMs.toLong()
+            } catch (e: Exception) {
+                android.util.Log.w("VoiceAssistantService", "Failed to load VAD settings, using defaults")
+            }
+            
+            // Validate and potentially adjust audio configuration for device compatibility
+            validateAudioConfiguration()
+            
+            try {
+                val bufferSize = AudioRecord.getMinBufferSize(
+                    sampleRate, channelConfig, audioFormat
+                ) ?: throw RuntimeException("Cannot get min buffer size")
+                
+                android.util.Log.d("VoiceAssistantService", "Using audio config: ${sampleRate}Hz, " +
+                    "channels=${if (channelConfig == AudioFormat.CHANNEL_IN_MONO) "mono" else "stereo"}, " +
+                    "format=${if (audioFormat == AudioFormat.ENCODING_PCM_16BIT) "16-bit PCM" else "8-bit PCM"}")
+                
+                audioRecord = AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                    sampleRate, channelConfig, audioFormat, bufferSize * 4
+                )
+                
+                if (audioRecord != null) {
+                    audioRecord?.startRecording()
+                    
+                    recordingThread = Thread(this::processAudioLoop)
+                    recordingThread?.start()
+                    
+                    // Start audio level updater coroutine
+                    serviceScope.launch {
+                        while (_state.value == STATE_LISTENING && serviceScope.isActive) {
+                            updateNotification("Listening... ${currentAudioLevel}%")
+                            delay(500L)
+                        }
+                    }
+                } else {
+                    _state.value = STATE_ERROR
+                    throw RuntimeException("Failed to initialize audio recorder")
+                }
+            } catch (e: Exception) {
+                _state.value = STATE_ERROR
+                handleError(e.message ?: "Audio initialization failed")
+            }
+        }
+    }
+
+    /**
+     * Stop the voice assistant with graceful shutdown.
+     * Waits for current TTS playback to finish, then properly cleans up resources.
+     */
+    private fun stopListening() {
+        currentAudioLevel = 0
+        
+        // If TTS is currently playing, wait briefly for it to finish before cancelling
+        if (isTtsPlaying) {
+            android.util.Log.d("VoiceAssistantService", "Waiting for TTS playback to complete...")
+            try {
+                Thread.sleep(2000L) // Wait up to 2 seconds for current speech to finish
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
+        
+        // Cancel the coroutine scope to stop all background tasks
+        serviceScope.cancel()
+        
+        try {
+            audioRecord?.stop()
+            audioRecord?.release()
+            audioTrack?.stop()
+            audioTrack?.release()
+        } catch (e: Exception) {
+            // Ignore release errors
+        }
+        audioRecord = null
+        audioTrack = null
+        
+        recordingThread?.join(5000)
+        recordingThread = null
+        
+        _state.value = STATE_IDLE
+        updateNotification("Stopped")
+    }
+
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    private fun resumeService() {
+        startListening()
+    }
+
+    private fun pauseService() {
+        stopListening()
+    }
+
+    /**
+     * Check if the device has an active network connection with internet access.
+     * Returns true only if there's a working network (WiFi or mobile data).
+     */
+    private fun isNetworkAvailable(): Boolean {
+        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return false
+        
+        val network = connectivityManager.activeNetwork
+        val capabilities = connectivityManager.getNetworkCapabilities(network)
+        
+        return capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true &&
+               capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
+
+    /**
+     * Check network availability before making API calls.
+     * Shows an error and returns early if offline.
+     */
+    private fun checkNetworkAndHandle(): Boolean {
+        if (!isNetworkAvailable()) {
+            _state.value = STATE_ERROR
+            updateNotification("⚠️ No network connection. Check your internet.")
+            android.util.Log.w("VoiceAssistantService", "API call attempted but no network available")
+            serviceScope.launch {
+                delay(3000L)
+                if (_state.value == STATE_ERROR) {
+                    _state.value = STATE_IDLE
+                    updateNotification("Idle")
+                }
+            }
+            return false
+        }
+        return true
+    }
+
+    // ==================== Audio Processing Loop ====================
+
+    /**
+     * Main audio processing loop that runs in a background thread.
+     * Wrapped with crash recovery - if the loop crashes unexpectedly, it will restart automatically.
+     * Includes buffer overflow protection to drop frames when processing is slower than recording.
+     */
+    private fun processAudioLoop() {
+        val buffer = ShortArray(4096)
+        // Accumulate the full utterance so the complete recording can be sent to STT
+        val speechBuffer = ArrayDeque<Short>()
+        var inSpeech = false
+        var silenceStart = 0L
+        
+        while (_state.value != STATE_IDLE && serviceScope.isActive) {
+            try {
+                // Buffer overflow protection: drop frames if processing is slower than recording.
+                // This prevents AudioRecord's internal buffer from overflowing when the device
+                // can't keep up with audio capture (e.g., during heavy LLM/TTS workloads).
+                if (shouldDropFrame()) {
+                    android.util.Log.d("VoiceAssistantService", "Dropping frame - processing backlog")
+                    Thread.sleep(50) // Brief pause to let processing catch up
+                    continue
+                }
+
+                val readCount = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+                
+                if (readCount > 0) {
+                    // Calculate RMS energy for VAD and audio level
+                    var sum = 0L
+                    for (i in 0 until readCount) {
+                        val absVal = kotlin.math.abs(buffer[i].toInt())
+                        sum += absVal.toLong()
+                    }
+                    val rms = kotlin.math.sqrt(sum.toDouble() / readCount).toFloat()
+                    
+                    // Convert RMS to 0-100% audio level indicator
+                    val levelPercent = ((rms / Short.MAX_VALUE.toFloat()) * 100f).toInt().coerceIn(0, 100)
+                    currentAudioLevel = levelPercent
+                    
+                    val isVoice = rms > vadSensitivity * Short.MAX_VALUE.toFloat()
+                    
+                    if (isVoice) {
+                        // Start (or continue) capturing the utterance
+                        if (!inSpeech) {
+                            inSpeech = true
+                            speechBuffer.clear()
+                            android.util.Log.d("VoiceAssistantService", "Speech started")
+                        }
+                        for (i in 0 until readCount) {
+                            speechBuffer.add(buffer[i])
+                        }
+                        silenceStart = 0L
+                    } else if (inSpeech) {
+                        // Keep trailing silence in the buffer for natural transcription
+                        for (i in 0 until readCount) {
+                            speechBuffer.add(buffer[i])
+                        }
+                        if (silenceStart == 0L) {
+                            silenceStart = System.currentTimeMillis()
+                        } else if (System.currentTimeMillis() - silenceStart > vadMinSilenceDurationMs) {
+                            // End of speech detected - process the complete utterance
+                            val utterance = speechBuffer.toShortArray()
+                            speechBuffer.clear()
+                            inSpeech = false
+                            silenceStart = 0L
+                            currentAudioLevel = 0
+                            processUtterance(utterance)
+                        }
+                    }
+                } else if (readCount == 0) {
+                    // No data available - brief sleep to avoid busy-waiting
+                    Thread.sleep(10)
+                }
+            } catch (e: Exception) {
+                _state.value = STATE_ERROR
+                android.util.Log.e("VoiceAssistantService", "Audio processing error, restarting loop...", e)
+                updateNotification("Error: ${e.message}. Restarting...")
+                
+                // Brief pause before restart to avoid rapid crash loops
+                try {
+                    Thread.sleep(2000L)
+                } catch (_: InterruptedException) {
+                    return
+                }
+                
+                // Reset state and continue listening if not explicitly stopped
+                if (_state.value != STATE_IDLE && serviceScope.isActive) {
+                    _state.value = STATE_LISTENING
+                    updateNotification("Listening... (recovered)")
+                    silenceStart = 0L
+                    currentAudioLevel = 0
+                    // Continue loop - the while condition will re-evaluate
+                } else {
+                    break
+                }
+            }
+        }
+    }
+
+    /**
+     * Process a complete utterance: convert to WAV, transcribe via the STT
+     * endpoint, respond with the LLM and speak the response with TTS.
+     *
+     * @param buffer The full accumulated speech samples (16-bit mono PCM).
+     */
+    private fun processUtterance(buffer: ShortArray) {
+        if (buffer.isEmpty()) return
+        
+        _state.value = STATE_PROCESSING
+        updateNotification("Processing...")
+        
+        serviceScope.launch {
+            try {
+                // Convert the full utterance to WAV bytes for the STT endpoint
+                val wavBytes = convertToWav(buffer, buffer.size)
+                
+                // Get settings from SettingsRepository
+                val currentSettings = settingsRepository.loadSettings()
+                val sttBaseUrl = currentSettings.sttBaseUrl
+                val apiKey = currentSettings.sttApiKey
+                val model = currentSettings.sttModelName
+                
+                // Check network before API call
+                if (!checkNetworkAndHandle()) return@launch
+                
+                // Send to STT endpoint with retry logic
+                val transcribedText = try {
+                    executeWithRetry(
+                        operationName = "STT",
+                        maxRetries = MAX_RETRIES,
+                        delayMs = RETRY_DELAY_MS
+                    ) {
+                        ApiClient.transcribeAudio(
+                            baseUrl = sttBaseUrl,
+                            apiKey = apiKey,
+                            audioData = wavBytes,
+                            model = model
+                        )
+                    }
+                } catch (e: Exception) {
+                    handleError("STT failed after $MAX_RETRIES retries: ${e.message}")
+                    return@launch
+                }
+                
+                if (transcribedText.isNotEmpty()) {
+                    _currentMessage.value = transcribedText
+                    
+                    // Process with LLM and respond with TTS
+                    processWithLLMAndRespond(transcribedText)
+                } else {
+                    // Empty transcription - just return to listening
+                    _state.value = STATE_LISTENING
+                    updateNotification("Listening...")
+                }
+            } catch (e: Exception) {
+                handleError("Voice processing error: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Check if the audio processing pipeline is falling behind.
+     * Returns true if we should drop this frame to avoid buffer overflow.
+     */
+    private fun shouldDropFrame(): Boolean {
+        // If service is already processing and we have many pending frames, drop new ones
+        if (_state.value == STATE_PROCESSING) {
+            framesDroppedCount++
+            if (framesDroppedCount >= maxPendingFrames) {
+                android.util.Log.w("VoiceAssistantService", "Audio buffer overflow: dropped $framesDroppedCount frames. Processing is slower than recording.")
+                return true
+            }
+        } else {
+            // Reset counter when not processing
+            if (framesDroppedCount > 0) {
+                android.util.Log.d("VoiceAssistantService", "Recovered from buffer overflow, dropped $framesDroppedCount frames")
+            }
+            framesDroppedCount = 0
+        }
+        return false
+    }
+
+    /**
+     * Process user input through LLM and respond with TTS.
+     */
+    private suspend fun processWithLLMAndRespond(userInput: String) {
+        _state.value = STATE_PROCESSING
+        
+        // Get settings from SettingsRepository
+        val currentSettings = settingsRepository.loadSettings()
+        val llmBaseUrl = currentSettings.llmBaseUrl
+        val apiKey = currentSettings.llmApiKey
+        val model = currentSettings.llmModelName
+        
+        try {
+            // Build conversation history for context
+            val messagesList = listOf(
+                mapOf("role" to "user", "content" to userInput)
+            )
+            
+            // Check network before LLM call
+            if (!checkNetworkAndHandle()) return
+            
+            var responseText = ""
+            try {
+                val response = executeWithRetry(
+                    operationName = "LLM",
+                    maxRetries = MAX_RETRIES,
+                    delayMs = RETRY_DELAY_MS
+                ) {
+                    ApiClient.chatCompletion(
+                        baseUrl = llmBaseUrl,
+                        apiKey = apiKey,
+                        messages = messagesList,
+                        model = model,
+                        stream = false,
+                        systemPrompt = currentSettings.systemPrompt
+                    )
+                }
+                responseText = response.content
+            } catch (e: Exception) {
+                throw RuntimeException("LLM call failed after $MAX_RETRIES retries: ${e.message}")
+            }
+            
+            if (responseText.isNotEmpty()) {
+                _currentMessage.value = responseText
+                
+                // Synthesize speech and play it back
+                _state.value = STATE_SPEAKING
+                updateNotification("Speaking...")
+                
+                // Check network before TTS call
+                if (!checkNetworkAndHandle()) return
+                
+                try {
+                    val ttsBaseUrl = currentSettings.ttsBaseUrl
+                    val audioBytes = try {
+                        executeWithRetry(
+                            operationName = "TTS",
+                            maxRetries = MAX_RETRIES,
+                            delayMs = RETRY_DELAY_MS
+                        ) {
+                            ApiClient.synthesizeSpeech(
+                                baseUrl = ttsBaseUrl,
+                                apiKey = currentSettings.ttsApiKey,
+                                text = responseText,
+                                model = currentSettings.ttsModelName,
+                                voice = currentSettings.ttsVoiceName,
+                                responseFormat = currentSettings.ttsResponseFormat
+                            )
+                        }
+                    } catch (e: Exception) {
+                        throw RuntimeException("TTS failed after $MAX_RETRIES retries: ${e.message}")
+                    }
+                    
+                    playAudio(audioBytes)
+                } catch (e: Exception) {
+                    handleError("TTS failed: ${e.message}")
+                }
+                
+                // Process next queued speech after playback completes
+                serviceScope.launch {
+                    processNextQueuedSpeech()
+                }
+                
+                // Return to listening mode if continuous conversation is enabled
+                if (_state.value != STATE_IDLE) {
+                    _state.value = STATE_LISTENING
+                    updateNotification("Listening...")
+                }
+            } else {
+                handleError("Empty LLM response")
+            }
+        } catch (e: Exception) {
+            handleError("Response processing error: ${e.message}")
+        }
+    }
+
+    // ==================== Audio Helpers ====================
+
+    /**
+     * Convert short buffer to WAV format bytes.
+     */
+    private fun convertToWav(buffer: ShortArray, count: Int): ByteArray {
+        val byteCount = count * 2 // 16-bit samples
+        val wavHeader = ByteArray(44)
+        
+        // Write RIFF header
+        var offset = 0
+        writeString(wavHeader, "RIFF", offset); offset += 4
+        intToLittleEndian(byteCount + 36, wavHeader, offset); offset += 4
+        writeString(wavHeader, "WAVE", offset); offset += 4
+        
+        // Write fmt chunk
+        writeString(wavHeader, "fmt ", offset); offset += 4
+        intToLittleEndian(16, wavHeader, offset); offset += 4 // Subchunk size
+        shortToLittleEndian(1, wavHeader, offset); offset += 2 // PCM format
+        shortToLittleEndian(1, wavHeader, offset); offset += 2 // Mono
+        intToLittleEndian(sampleRate, wavHeader, offset); offset += 4
+        intToLittleEndian(sampleRate * 2, wavHeader, offset); offset += 4 // Byte rate
+        shortToLittleEndian(2, wavHeader, offset); offset += 2 // Block align
+        shortToLittleEndian(16, wavHeader, offset); offset += 2 // Bits per sample
+        
+        // Write data chunk
+        writeString(wavHeader, "data", offset); offset += 4
+        intToLittleEndian(byteCount, wavHeader, offset)
+        
+        // Convert shorts to bytes (little-endian format for WAV)
+        val audioBytes = ByteArray(count * 2)
+        for (i in 0 until count) {
+            val sample = buffer[i].toInt()
+            audioBytes[i * 2] = sample.toByte()           // Low byte
+            audioBytes[i * 2 + 1] = (sample ushr 8).toByte() // High byte
+        }
+        
+        return wavHeader + audioBytes
+    }
+    
+    private fun writeString(bytes: ByteArray, s: String, pos: Int) {
+        for (i in s.indices) bytes[pos + i] = s[i].code.toByte()
+    }
+    
+    private fun intToLittleEndian(value: Int, bytes: ByteArray, pos: Int) {
+        bytes[pos] = value.toByte()
+        bytes[pos + 1] = (value shr 8).toByte()
+        bytes[pos + 2] = (value shr 16).toByte()
+        bytes[pos + 3] = (value shr 24).toByte()
+    }
+    
+    private fun shortToLittleEndian(value: Int, bytes: ByteArray, pos: Int) {
+        bytes[pos] = value.toByte()
+        bytes[pos + 1] = (value shr 8).toByte()
+    }
+
+    /**
+     * Play audio bytes through the system speaker using AudioTrack.
+     * TTS endpoints return WAV files - the header is parsed to get the real
+     * sample rate and stripped before playback.
+     */
+    private suspend fun playAudio(audioBytes: ByteArray) {
+        com.localassistant.app.ui.common.playAudioBytes(audioBytes)
+    }
+
+    /**
+     * Queue speech text for TTS playback. If TTS is currently playing,
+     * the new text is added to a FIFO queue and will be played after
+     * the current speech completes.
+     */
+    private fun queueSpeechForTts(text: String) {
+        ttsSpeechQueue.add(text)
+        android.util.Log.d("VoiceAssistantService", "Queued TTS speech (${ttsSpeechQueue.size} items in queue)")
+    }
+
+    /**
+     * Process the next item in the TTS speech queue.
+     * Synthesizes and plays the queued text, then recursively processes
+     * the next item if there are more queued.
+     */
+    private suspend fun processNextQueuedSpeech() {
+        val nextText = ttsSpeechQueue.poll()
+        if (nextText.isNullOrEmpty()) {
+            isTtsPlaying = false
+            return
+        }
+
+        isTtsPlaying = true
+        _state.value = STATE_SPEAKING
+        updateNotification("Speaking...")
+
+        try {
+            val currentSettings = settingsRepository.loadSettings()
+            
+            if (!checkNetworkAndHandle()) {
+                // If no network, skip this item and process next
+                isTtsPlaying = false
+                serviceScope.launch {
+                    delay(500L)
+                    processNextQueuedSpeech()
+                }
+                return
+            }
+
+            val audioBytes = try {
+                executeWithRetry(
+                    operationName = "TTS-Queue",
+                    maxRetries = MAX_RETRIES,
+                    delayMs = RETRY_DELAY_MS
+                ) {
+                    ApiClient.synthesizeSpeech(
+                        baseUrl = currentSettings.ttsBaseUrl,
+                        apiKey = currentSettings.ttsApiKey,
+                        text = nextText,
+                        model = currentSettings.ttsModelName,
+                        voice = currentSettings.ttsVoiceName,
+                        responseFormat = currentSettings.ttsResponseFormat
+                    )
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("VoiceAssistantService", "TTS queue failed for queued message: ${e.message}")
+                isTtsPlaying = false
+                serviceScope.launch {
+                    delay(500L)
+                    processNextQueuedSpeech()
+                }
+                return
+            }
+
+            playAudio(audioBytes)
+        } catch (e: Exception) {
+            android.util.Log.e("VoiceAssistantService", "TTS queue processing error: ${e.message}")
+            isTtsPlaying = false
+        }
+
+        // Process next item in queue after this one completes
+        serviceScope.launch {
+            delay(200L) // Brief pause between queued messages
+            processNextQueuedSpeech()
+        }
+    }
+
+    // ==================== Notification Management ====================
+
+    private fun createNotificationChannel() {
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            "Voice Assistant",
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "Local AI Voice Assistant - Always listening mode"
+            setShowBadge(false)
+            setSound(null, null)
+        }
+        
+        notificationManager.createNotificationChannel(channel)
+    }
+
+    private fun buildNotification(state: String): Notification {
+        val intent = packageManager.getLaunchIntentForPackage(packageName)?.let { launchIntent ->
+            PendingIntent.getActivity(
+                this, 0, launchIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+        }
+        
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Local Assistant")
+            .setContentText(getStateText(state))
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(intent)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+            .build()
+    }
+
+    private fun updateNotification(text: String) {
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Local Assistant")
+            .setContentText(text)
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .build()
+        
+        notificationManager.notify(NOTIFICATION_ID, notification)
+    }
+
+    private fun getStateText(state: String): String = when (state) {
+        STATE_LISTENING -> "Listening..."
+        STATE_PROCESSING -> "Processing..."
+        STATE_SPEAKING -> "Speaking..."
+        STATE_ERROR -> "Error"
+        else -> "Idle"
+    }
+
+    // ==================== Error Handling ====================
+
+    private fun handleError(message: String) {
+        _state.value = STATE_ERROR
+        updateNotification("Error: $message")
+        
+        // Auto-recover after 3 seconds
+        serviceScope.launch {
+            delay(3000L)
+            if (_state.value == STATE_ERROR) {
+                _state.value = STATE_IDLE
+                updateNotification("Idle")
+            }
+        }
+    }
+
+    /**
+     * Execute a suspend operation with retry logic for transient failures.
+     *
+     * @param operationName Name of the operation (for logging)
+     * @param maxRetries Maximum number of retry attempts
+     * @param delayMs Delay in milliseconds between retries
+     * @param block The suspend function to execute
+     * @return The result of the successful execution
+     * @throws Exception if all retries are exhausted
+     */
+    private suspend fun <T> executeWithRetry(
+        operationName: String,
+        maxRetries: Int = MAX_RETRIES,
+        delayMs: Long = RETRY_DELAY_MS,
+        block: suspend () -> T
+    ): T {
+        var lastException: Exception? = null
+        for (attempt in 1..maxRetries) {
+            try {
+                return block()
+            } catch (e: Exception) {
+                lastException = e
+                if (attempt < maxRetries) {
+                    _state.value = STATE_PROCESSING
+                    updateNotification("$operationName retry $attempt/$maxRetries...")
+                    delay(delayMs)
+                }
+            }
+        }
+        throw RuntimeException("$operationName failed after $maxRetries attempts: ${lastException?.message}", lastException)
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        // Don't stop foreground service when task is removed
+    }
+
+    /**
+     * Called when the service is being destroyed.
+     * Performs graceful shutdown: stops recording, cancels TTS playback,
+     * and updates notification to "Stopped" state.
+     */
+    override fun onDestroy() {
+        super.onDestroy()
+        android.util.Log.d("VoiceAssistantService", "Service destroying - performing graceful shutdown")
+        try {
+            unregisterReceiver(batteryReceiver)
+        } catch (e: Exception) {
+            // Receiver may not have been registered
+        }
+        stopListening()
+    }
+    
+    // ==================== Wake Word Detection Integration Point ====================
+
+    /**
+     * Placeholder method for wake word detection integration.
+     *
+     * This method is called periodically with raw audio bytes to check if the user's
+     * wake word has been detected. By default, it returns false (no wake word support).
+     *
+     * To integrate an external wake word library:
+     *
+     * 1. Add the wake word library dependency (e.g., Porcupine or Snowboy)
+     *    to your build.gradle.kts:
+     *
+     *    // For Porcupine (Picovoice):
+     *    implementation("ai.picovoice:porcupine-android:x.y.z")
+     *
+     * 2. Initialize the wake word engine in onCreate():
+     *
+     *    private var porcupine: Porcupine? = null
+     *
+     *    override fun onCreate() {
+     *        super.onCreate()
+     *        // ... existing init code ...
+     *        try {
+     *            val accessKey = getSharedPreferences("app_prefs", MODE_PRIVATE)
+     *                .getString("porcupine_access_key", "")
+     *            if (accessKey.isNotBlank()) {
+     *                porcupine = PorcupineBuilder()
+     *                    .setAccessKey(accessKey)
+     *                    .setModelPath("/path/to/porcupine.ppn")
+     *                    .setKeywordPath("/path/to/keyword.ppn")
+     *                    .build()
+     *            }
+     *        } catch (e: Exception) {
+     *            android.util.Log.w("VoiceAssistantService", "Wake word init failed: ${e.message}")
+     *        }
+     *    }
+     *
+     * 3. Override this method to call the wake word engine:
+     *
+     *    override fun detectWakeWord(audioBytes: ByteArray): Boolean {
+     *        return try {
+     *            porcupine?.process(
+     *                ShortArray(audioBytes.size / 2).apply {
+     *                    for (i in indices) {
+     *                        this[i] = ((audioBytes[i * 2].toInt() and 0xFF) or
+     *                                (audioBytes[i * 2 + 1].toInt() shl 8)).toShort()
+     *                    }
+     *                }
+     *            ) != -1
+     *        } catch (e: Exception) {
+     *            android.util.Log.w("VoiceAssistantService", "Wake word detection failed: ${e.message}")
+     *            false
+     *        }
+     *    }
+     *
+     * 4. Call this method from the audio processing loop:
+     *
+     *    if (detectWakeWord(audioBytes)) {
+     *        android.util.Log.d("VoiceAssistantService", "Wake word detected!")
+     *        _state.value = STATE_LISTENING
+     *        // Continue listening for command...
+     *    }
+     *
+     * @param audioBytes Raw PCM audio bytes (16-bit, 16kHz mono) to analyze
+     * @return true if the wake word was detected, false otherwise
+     */
+    open fun detectWakeWord(audioBytes: ByteArray): Boolean {
+        // Default implementation: no wake word detection
+        // Override this method in a subclass or anonymous object to integrate
+        // external wake word libraries like Porcupine (Picovoice) or Snowboy
+        return false
+    }
+
+    // ==================== Energy-Saving Mode ====================
+
+    /**
+     * BroadcastReceiver that monitors battery level changes.
+     * Automatically reduces audio quality when battery is low (<20%).
+     */
+    private val batteryReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_BATTERY_CHANGED) {
+                checkBatteryLevel()
+            }
+        }
+    }
+    
+    /**
+     * Check battery level and adjust audio quality accordingly.
+     * When battery < 20%: reduce sample rate to 8kHz for energy saving.
+     * When charging or battery >= 20%: restore normal settings (16kHz).
+     */
+    private fun checkBatteryLevel() {
+        try {
+            val levelIntent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            if (levelIntent != null) {
+                val level = levelIntent.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, 100)
+                val scale = levelIntent.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100)
+                val status = levelIntent.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1)
+                val isCharging = status == android.os.BatteryManager.BATTERY_STATUS_CHARGING
+                
+                val batteryPercent = (level * 100 / scale.toFloat()).toInt()
+                
+                if (isCharging) {
+                    // Restore normal settings when charging
+                    if (energySavingMode) {
+                        energySavingMode = false
+                        android.util.Log.d("VoiceAssistantService", "Battery charging - restoring normal audio quality")
+                        updateNotification("Normal mode - Charging")
+                    }
+                } else if (batteryPercent < 20 && !energySavingMode) {
+                    // Enter energy-saving mode
+                    energySavingMode = true
+                    sampleRate = 8000 // Reduce from 16kHz to 8kHz
+                    android.util.Log.d("VoiceAssistantService", "Low battery ($batteryPercent%) - entering energy-saving mode (8kHz)")
+                    updateNotification("Energy saving mode - $batteryPercent%")
+                } else if (!energySavingMode && batteryPercent >= 20) {
+                    // Normal operation
+                    android.util.Log.d("VoiceAssistantService", "Battery level: $batteryPercent% - normal operation")
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("VoiceAssistantService", "Failed to check battery level: ${e.message}")
+        }
+    }
+}

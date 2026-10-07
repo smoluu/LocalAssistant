@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home screen widget layout with large microphone button -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:gravity="center"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <!-- Large microphone button -->
+    <ImageButton
+        android:id="@+id/widget_mic_button"
+        android:layout_width="80dp"
+        android:layout_height="80dp"
+        android:background="?android:attr/selectableItemBackgroundBorderless"
+        android:contentDescription="@string/voice_assistant"
+        android:src="@android:drawable/sym_action_call" />
+
+    <!-- Status text below button -->
+    <TextView
+        android:id="@+id/widget_status_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="@string/voice_assistant_tap_to_activate"
+        android:textSize="12sp" />
+
+</LinearLayout>

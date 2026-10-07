@@ -1,0 +1,380 @@
+package com.localassistant.app.ui.chat
+
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build.VERSION
+import android.os.Build.VERSION_CODES
+import androidx.activity.ComponentActivity
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.localassistant.app.data.remote.ApiClient
+import com.localassistant.app.data.settings.SettingsRepository
+import com.localassistant.app.domain.model.ChatMessage
+import com.localassistant.app.domain.model.MessageRole
+import com.localassistant.app.service.VoiceAssistantService
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
+
+/**
+ * ViewModel for the chat screen.
+ * 
+ * Manages conversation history and coordinates with the voice assistant service.
+ */
+class ChatViewModel(application: android.app.Application) : AndroidViewModel(application) {
+    
+    private val context = application.applicationContext
+    private val settingsRepository = SettingsRepository(context)
+    
+    // App settings - exposed as StateFlow for UI observation
+    val settings: StateFlow<com.localassistant.app.domain.model.AppSettings> = settingsRepository.settingsFlow
+    
+    // Conversation messages - exposed as StateFlow for UI observation
+    private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
+    val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
+    
+    // Voice assistant service state
+    private val _serviceState = MutableStateFlow("idle")
+    val serviceState: StateFlow<String> = _serviceState.asStateFlow()
+    
+    /**
+     * Update the service state from outside (e.g., when voice recording starts/stops).
+     */
+    fun setServiceState(state: String) {
+        _serviceState.value = state
+    }
+
+    // Tracks whether a text message is currently being sent (for loading indicator)
+    private val _isSendingText = MutableStateFlow(false)
+    val isSendingText: StateFlow<Boolean> = _isSendingText.asStateFlow()
+    
+    /**
+     * Stream for the current streaming assistant response content.
+     */
+    private val _streamingContent = MutableStateFlow("")
+    val streamingContent: StateFlow<String> = _streamingContent.asStateFlow()
+    
+    /**
+     * Update streaming content from outside (used by ChatScreen for voice interactions).
+     */
+    fun updateStreamingContent(chunk: String) {
+        _streamingContent.value = chunk
+    }
+    
+    /**
+     * Update streaming reasoning/thinking content.
+     */
+    fun updateStreamingReasoning(chunk: String) {
+        _streamingReasoning.value = chunk
+    }
+    
+    /**
+     * Update app settings via the settings repository.
+     */
+    fun updateSettings(settings: com.localassistant.app.domain.model.AppSettings) {
+        settingsRepository.updateSettings(settings)
+    }
+    
+    /**
+     * Stream for the current streaming reasoning content.
+     */
+    private val _streamingReasoning = MutableStateFlow("")
+    val streamingReasoning: StateFlow<String> = _streamingReasoning.asStateFlow()
+
+    
+    /**
+     * Add a new message to the conversation.
+     */
+    fun addMessage(role: MessageRole, content: String) {
+        val message = ChatMessage(
+            role = role,
+            content = content
+        )
+        
+        _messages.update { current ->
+            current + listOf(message)
+        }
+    }
+    
+    /**
+     * Send a text message to the LLM and display the response with streaming.
+     */
+    fun sendMessage(text: String, llmBaseUrl: String, apiKey: String?, model: String) {
+        android.util.Log.d("ChatViewModel", "sendMessage called with text length: ${text.length}")
+        addMessage(MessageRole.USER, text)
+        _serviceState.value = "processing"
+        _isSendingText.value = true
+        _streamingContent.value = ""
+        _streamingReasoning.value = ""
+
+        viewModelScope.launch {
+            val contentBuilder = StringBuilder()
+            val reasoningBuilder = StringBuilder()
+
+            try {
+                val messagesList = _messages.value.map { msg ->
+                    mapOf("role" to msg.role.name.lowercase(), "content" to msg.content)
+                }
+
+                ApiClient.chatCompletion(
+                    baseUrl = llmBaseUrl,
+                    apiKey = apiKey,
+                    messages = messagesList,
+                    model = model,
+                    stream = true,
+                    systemPrompt = settings.value.systemPrompt
+                ) { chunk: String ->
+                    // Reasoning chunks are prefixed with the \u0001 separator -
+                    // keep them out of the visible content
+                    if (chunk.startsWith("\u0001")) {
+                        reasoningBuilder.append(chunk.substring(1))
+                        _streamingReasoning.value = reasoningBuilder.toString()
+                    } else {
+                        contentBuilder.append(chunk)
+                        _streamingContent.value = contentBuilder.toString()
+                    }
+                }
+
+                // Parse the accumulated content for <think>...</think> style tags
+                val parsed = ApiClient.parseReasoningAndContent(contentBuilder.toString())
+                val content = parsed.content.trim()
+                val reasoning = reasoningBuilder.toString().trim()
+                    .ifEmpty { parsed.reasoningContent.orEmpty() }
+                    .trim()
+
+                android.util.Log.d("ChatViewModel", "Got response: ${content.take(100)}")
+
+                if (content.isNotEmpty()) {
+                    addMessage(MessageRole.ASSISTANT, content, reasoning.takeIf { it.isNotEmpty() })
+                } else {
+                    addMessage(
+                        MessageRole.ASSISTANT,
+                        "Sorry, I couldn't get a response."
+                    )
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("ChatViewModel", "Error in sendMessage", e)
+                val errorMsg = "Error: ${e.message ?: "Failed to connect to LLM endpoint"}"
+                addMessage(MessageRole.ASSISTANT, errorMsg)
+            } finally {
+                // Clear streaming state AFTER the final message is added
+                _streamingContent.value = ""
+                _streamingReasoning.value = ""
+                _serviceState.value = "idle"
+                _isSendingText.value = false
+            }
+        }
+    }
+    
+    /**
+     * Add a new message to the conversation with optional reasoning content.
+     */
+    fun addMessage(role: MessageRole, content: String, reasoningContent: String? = null) {
+        val message = ChatMessage(
+            role = role,
+            content = content,
+            reasoningContent = reasoningContent
+        )
+        
+        _messages.update { current ->
+            current + listOf(message)
+        }
+    }
+    
+    /**
+     * Start the voice assistant service.
+     */
+    fun startVoiceAssistant() {
+        val intent = VoiceAssistantService.buildIntent(context, VoiceAssistantService.ACTION_START)
+        context.startForegroundService(intent)
+        _serviceState.value = "listening"
+    }
+    
+    /**
+     * Stop the voice assistant service.
+     */
+    fun stopVoiceAssistant() {
+        val intent = VoiceAssistantService.buildIntent(context, VoiceAssistantService.ACTION_STOP)
+        context.startService(intent)
+        _serviceState.value = "idle"
+    }
+    
+    /**
+     * Clear all conversation history.
+     */
+    fun clearHistory() {
+        _messages.value = emptyList()
+    }
+
+    // ==================== Conversation Summarization ====================
+
+    /**
+     * Threshold for triggering automatic conversation summarization.
+     * When message count exceeds this, older messages are summarized via the LLM API.
+     */
+    private companion object {
+        const val SUMMARY_THRESHOLD = 50
+    }
+
+    /**
+     * Check if the current conversation needs summarization and perform it asynchronously.
+     *
+     * When the number of messages exceeds [SUMMARY_THRESHOLD], this method uses the LLM API
+     * to create a concise summary of older messages, keeping only recent context in memory.
+     */
+    fun maybeSummarizeConversation(llmBaseUrl: String?, apiKey: String?, model: String?) {
+        viewModelScope.launch {
+            val currentMessages = _messages.value
+            if (currentMessages.size > SUMMARY_THRESHOLD && llmBaseUrl != null && model != null) {
+                android.util.Log.d("ChatViewModel", "Conversation has ${currentMessages.size} messages, triggering summarization...")
+                try {
+                    // Keep the last 50 messages, summarize the rest
+                    val keepCount = 50
+                    val messagesToSummarize = currentMessages.take(currentMessages.size - keepCount)
+                    val recentMessages = currentMessages.takeLast(keepCount)
+
+                    val summaryPrompt = buildString {
+                        append("Please summarize the following conversation history concisely:\n\n")
+                        for (msg in messagesToSummarize) {
+                            val role = if (msg.role == com.localassistant.app.domain.model.MessageRole.USER) "User" else "Assistant"
+                            append("[$role]: ${msg.content}\n\n")
+                        }
+                    }
+
+                    val messagesList = listOf(
+                        mapOf("role" to "system", "content" to "You are a conversation summarizer. Provide concise, accurate summaries."),
+                        mapOf("role" to "user", "content" to summaryPrompt)
+                    )
+
+                    // Non-streaming call returns the full response in the ChatResponse -
+                    // the onChunk callback is not invoked when stream = false
+                    val summaryResponse = com.localassistant.app.data.remote.ApiClient.chatCompletion(
+                        baseUrl = llmBaseUrl,
+                        apiKey = apiKey,
+                        messages = messagesList,
+                        model = model,
+                        stream = false
+                    )
+                    val summaryText = summaryResponse.content.trim()
+
+                    if (summaryText.isNotBlank()) {
+                        val summaryMessage = com.localassistant.app.domain.model.ChatMessage(
+                            role = com.localassistant.app.domain.model.MessageRole.ASSISTANT,
+                            content = "📝 Conversation Summary: $summaryText",
+                            timestamp = System.currentTimeMillis()
+                        )
+
+                        _messages.value = listOf(summaryMessage) + recentMessages
+                        android.util.Log.d("ChatViewModel", "Conversation summarized. New count: ${_messages.value.size}")
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.w("ChatViewModel", "Summarization failed: ${e.message}")
+                }
+            }
+        }
+    }
+
+    // ==================== Message Pinning ====================
+
+    /**
+     * Pin a message to SharedPreferences so it appears at the top of the chat.
+     */
+    fun pinMessage(message: com.localassistant.app.domain.model.ChatMessage) {
+        val prefs = context.getSharedPreferences("chat_prefs", android.content.Context.MODE_PRIVATE)
+        val count = prefs.getInt("pinned_count", 0)
+
+        // If already pinned, update it in place
+        for (i in 0 until count) {
+            if (prefs.getLong("pinned_id_$i", -1) == message.id) {
+                with(prefs.edit()) {
+                    putLong("pinned_id_$i", message.id)
+                    putString("pinned_role_$i", message.role.name)
+                    putString("pinned_content_$i", message.content)
+                    putLong("pinned_timestamp_$i", message.timestamp)
+                    apply()
+                }
+                return
+            }
+        }
+
+        // Add as new pinned message (max 10)
+        if (count < 10) {
+            with(prefs.edit()) {
+                putInt("pinned_count", count + 1)
+                putLong("pinned_id_$count", message.id)
+                putString("pinned_role_$count", message.role.name)
+                putString("pinned_content_$count", message.content)
+                putLong("pinned_timestamp_$count", message.timestamp)
+                apply()
+            }
+        }
+    }
+
+    /**
+     * Unpin a message by removing it from SharedPreferences.
+     */
+    fun unpinMessage(messageId: Long) {
+        val prefs = context.getSharedPreferences("chat_prefs", android.content.Context.MODE_PRIVATE)
+        val count = prefs.getInt("pinned_count", 0)
+
+        var foundIndex = -1
+        for (i in 0 until count) {
+            if (prefs.getLong("pinned_id_$i", -1) == messageId) {
+                foundIndex = i
+                break
+            }
+        }
+
+        if (foundIndex >= 0) {
+            with(prefs.edit()) {
+                // Shift remaining messages down by one
+                for (i in foundIndex until count - 1) {
+                    putLong("pinned_id_$i", prefs.getLong("pinned_id_${i + 1}", -1))
+                    putString("pinned_role_$i", prefs.getString("pinned_role_${i + 1}", ""))
+                    putString("pinned_content_$i", prefs.getString("pinned_content_${i + 1}", ""))
+                    putLong("pinned_timestamp_$i", prefs.getLong("pinned_timestamp_${i + 1}", 0L))
+                }
+                // Clear the last entry
+                putLong("pinned_id_${count - 1}", -1)
+                putString("pinned_role_${count - 1}", "")
+                putString("pinned_content_${count - 1}", "")
+                putLong("pinned_timestamp_${count - 1}", 0L)
+                putInt("pinned_count", count - 1)
+                apply()
+            }
+        }
+    }
+    
+    /**
+     * Request runtime permissions from the host activity.
+     */
+    fun requestPermissions(activity: ComponentActivity) {
+        val permissionsToRequest = mutableListOf<String>()
+        
+        if (ContextCompat.checkSelfPermission(
+            activity,
+            Manifest.permission.RECORD_AUDIO
+        ) != PackageManager.PERMISSION_GRANTED) {
+            permissionsToRequest.add(Manifest.permission.RECORD_AUDIO)
+        }
+        
+        if (VERSION.SDK_INT >= VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(
+                activity,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED) {
+                permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+        
+        if (permissionsToRequest.isNotEmpty()) {
+            androidx.core.app.ActivityCompat.requestPermissions(
+                activity,
+                permissionsToRequest.toTypedArray(),
+                1001
+            )
+        }
+    }
+}

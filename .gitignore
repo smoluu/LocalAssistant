@@ -1,0 +1,28 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Gradle build output (the /build rule above only matches the repository root)
+app/build/
+app/**/build/
+
+# Kotlin lint/type-check cache
+.kotlin/
+
+# Local scratch copy of the sample recording; the app bundles app/src/main/assets/voice_clone.wav
+test_audio/
+
+# Machine-specific notes (endpoints, adb device, local commands) - not part of the project
+AGENTS.local.md
