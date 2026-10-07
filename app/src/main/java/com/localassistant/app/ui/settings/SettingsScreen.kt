@@ -232,9 +232,13 @@ fun SettingsScreen(onNavigateBack: () -> Unit, viewModel: SettingsViewModel = vi
                         modifier = Modifier.weight(1f)
                     ) { Text("WAV") }
                 }
-                SettingSwitch("Auto TTS Playback", settings.enableForegroundService, { viewModel.updateSetting("enableForegroundService", it) })
+                SettingSwitch("Auto TTS Playback", settings.autoTtsEnabled, { viewModel.updateSetting("autoTtsEnabled", it) })
                 SettingSwitch("Enable Streaming TTS", settings.enableTtsStreaming, { viewModel.updateSetting("enableTtsStreaming", it) })
                 TestButton("Test TTS", true, ttsTesting) { viewModel.runEndpointTest("tts") }
+            }
+
+            SettingsSection("Appearance", "🎨", "How the interface looks") {
+                SettingSwitch("Dark Mode (gray Gruvbox)", settings.darkModeEnabled, { viewModel.updateSetting("darkModeEnabled", it) })
             }
             
             SettingsSection("Data Management", "💾", "Export, import, and manage your settings data") {

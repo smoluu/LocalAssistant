@@ -82,7 +82,7 @@ class SettingsRepository(private val context: Context) {
             enableForegroundService = sharedPreferences.getBoolean("enable_foreground_service", true),
             autoStartOnBoot = sharedPreferences.getBoolean("auto_start_on_boot", true),
             batteryOptimizationExempted = sharedPreferences.getInt("battery_optimization_exempted", 0) == 1,
-            darkModeEnabled = sharedPreferences.getBoolean("dark_mode_enabled", false),
+            darkModeEnabled = sharedPreferences.getBoolean("dark_mode_enabled", true),
 
             // Advanced / Debug Settings
             debugLoggingEnabled = sharedPreferences.getBoolean("debug_logging_enabled", false),

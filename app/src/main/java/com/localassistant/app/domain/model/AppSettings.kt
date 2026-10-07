@@ -47,7 +47,7 @@ data class AppSettings(
     // Chat Display Settings
     val autoTtsEnabled: Boolean = true,
     val autoExpandReasoning: Boolean = true,
-    val darkModeEnabled: Boolean = false,
+    val darkModeEnabled: Boolean = true,
 
     // Advanced / Debug Settings (hidden by default)
     val debugLoggingEnabled: Boolean = false,
