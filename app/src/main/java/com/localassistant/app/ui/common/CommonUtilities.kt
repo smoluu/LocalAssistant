@@ -452,21 +452,48 @@ fun splitIntoSentences(text: String): List<String> {
  
      val ttsBaseUrl = ttsSettings.first!!
      val ttsApiKey = ttsSettings.second?.takeIf { it.isNotBlank() }
- 
+
+     // Streaming playback: synthesize and speak one sentence at a time, so audio
+     // starts before the whole reply is ready. The local TTS proxies have no SSE
+     // route, so the chunking happens here against the plain /audio/speech call.
+     if (enableStreaming) {
+         val sentences = splitIntoSentences(cleanText)
+         if (sentences.size > 1) {
+             var played = false
+             for (sentence in sentences) {
+                 val chunk = fetchTtsAudio(ttsBaseUrl, ttsApiKey, sentence, model, voice, responseFormat)
+                     ?: fetchTtsAudio(ttsBaseUrl, ttsApiKey, sentence, model, null, responseFormat)
+                 if (chunk != null && chunk.isNotEmpty() && playAudioBytes(chunk)) {
+                     played = true
+                 }
+             }
+             if (played) return
+             android.util.Log.w("TTS", "Streaming playback failed, falling back to a single request")
+         }
+     }
+
      try {
          // Download the full audio. Many local TTS servers (e.g. Piper proxies)
          // reject the `voice` field with HTTP 400, so if the first request fails
          // we retry without a voice to fall back to the server's default voice.
          val audioBytes = fetchTtsAudio(ttsBaseUrl, ttsApiKey, cleanText, model, voice, responseFormat)
              ?: fetchTtsAudio(ttsBaseUrl, ttsApiKey, cleanText, model, null, responseFormat)
- 
+
          if (audioBytes == null || audioBytes.isEmpty()) {
              android.util.Log.e("TTS", "TTS produced no audio")
              return
          }
- 
-         if (!playAudioBytes(audioBytes)) {
-             android.util.Log.e("TTS", "Failed to play TTS audio")
+
+         if (playAudioBytes(audioBytes)) return
+
+         // Some endpoints advertise mp3 but only produce a container this device can
+         // decode as wav, so retry once in the format the player is known to handle.
+         if (responseFormat != "wav") {
+             android.util.Log.w("TTS", "Could not play $responseFormat, retrying as wav")
+             val wav = fetchTtsAudio(ttsBaseUrl, ttsApiKey, cleanText, model, null, "wav")
+             if (wav != null && wav.isNotEmpty()) {
+                 playAudioBytes(wav)
+             }
          }
      } catch (e: Exception) {
          android.util.Log.e("TTS", "TTS playback failed: ${e.message}", e)

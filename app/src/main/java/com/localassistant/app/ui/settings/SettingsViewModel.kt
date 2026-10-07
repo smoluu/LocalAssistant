@@ -425,10 +425,25 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                         if (audio.isEmpty()) {
                             _ttsStatus.value = EndpointStatus(false, "TTS endpoint returned 0 bytes")
                         } else {
-                            val played = playAudioBytes(audio)
+                            var played = playAudioBytes(audio)
+                            var playedBytes = audio.size
+                            if (!played && currentSettings.ttsResponseFormat != "wav") {
+                                val wav = ApiClient.synthesizeSpeech(
+                                    baseUrl = currentSettings.ttsBaseUrl,
+                                    apiKey = if (currentSettings.ttsApiKey.isBlank()) null else currentSettings.ttsApiKey,
+                                    text = "Test successful",
+                                    model = currentSettings.ttsModelName,
+                                    voice = currentSettings.ttsVoiceName,
+                                    responseFormat = "wav"
+                                )
+                                if (wav.isNotEmpty() && playAudioBytes(wav)) {
+                                    played = true
+                                    playedBytes = wav.size
+                                }
+                            }
                             _ttsStatus.value = EndpointStatus(
                                 true,
-                                if (played) "Played ${audio.size} bytes on the device"
+                                if (played) "Played ${playedBytes} bytes on the device"
                                 else "Received ${audio.size} bytes, but playback failed"
                             )
                         }
