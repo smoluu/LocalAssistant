@@ -222,6 +222,9 @@ class SettingsRepository(private val context: Context) {
 
     // ==================== Preset JSON Helpers ====================
 
+    // A preset must carry every field of AppSettings, otherwise restoring one
+    // silently resets the settings it never wrote - the TTS response format and
+    // the wake-word switch were exactly the ones lost this way.
     private fun buildPresetJson(settings: com.localassistant.app.domain.model.AppSettings): String {
         val sb = StringBuilder()
         sb.append("{")
@@ -235,21 +238,43 @@ class SettingsRepository(private val context: Context) {
         appendStr(sb, "ttsModelName", settings.ttsModelName)
         appendStr(sb, "ttsVoiceName", settings.ttsVoiceName)
         appendStr(sb, "ttsApiKey", settings.ttsApiKey)
+        appendStr(sb, "ttsResponseFormat", settings.ttsResponseFormat)
+        appendBool(sb, "enableTtsStreaming", settings.enableTtsStreaming)
         appendStr(sb, "systemPrompt", settings.systemPrompt)
         appendStr(sb, "wakeWordName", settings.wakeWordName)
+        appendBool(sb, "enableWakeWordDetection", settings.enableWakeWordDetection)
         appendStr(sb, "wakeWordModel", settings.wakeWordModel)
-        sb.append("\"wakeWordSensitivity\":${settings.wakeWordSensitivity},")
-        sb.append("\"vadSensitivity\":${settings.vadSensitivity},")
-        sb.append("\"vadMinSilenceDurationMs\":${settings.vadMinSilenceDurationMs},")
-        sb.append("\"enableForegroundService\":${settings.enableForegroundService},")
-        sb.append("\"continuousConversationMode\":${settings.continuousConversationMode},")
-        sb.append("\"autoStartOnBoot\":${settings.autoStartOnBoot}")
+        appendNum(sb, "wakeWordSensitivity", settings.wakeWordSensitivity)
+        appendNum(sb, "vadSensitivity", settings.vadSensitivity)
+        appendNum(sb, "vadMinSilenceDurationMs", settings.vadMinSilenceDurationMs)
+        appendBool(sb, "continuousConversationMode", settings.continuousConversationMode)
+        appendBool(sb, "enableForegroundService", settings.enableForegroundService)
+        appendBool(sb, "autoStartOnBoot", settings.autoStartOnBoot)
+        appendBool(sb, "batteryOptimizationExempted", settings.batteryOptimizationExempted)
+        appendBool(sb, "autoTtsEnabled", settings.autoTtsEnabled)
+        appendBool(sb, "autoExpandReasoning", settings.autoExpandReasoning)
+        appendBool(sb, "darkModeEnabled", settings.darkModeEnabled)
+        appendBool(sb, "debugLoggingEnabled", settings.debugLoggingEnabled)
+        appendNum(sb, "httpTimeoutSeconds", settings.httpTimeoutSeconds)
+        appendBool(sb, "forceHttps", settings.forceHttps)
+        appendStr(sb, "preferredLocale", settings.preferredLocale)
+
+        // Every writer leaves a trailing comma, so drop the one before the brace.
+        if (sb.lastOrNull() == ',') sb.deleteCharAt(sb.length - 1)
         sb.append("}")
         return sb.toString()
     }
 
     private fun appendStr(sb: StringBuilder, key: String, value: String) {
         sb.append("\"$key\":\"").append(escapeJsonString(value)).append("\",")
+    }
+
+    private fun appendBool(sb: StringBuilder, key: String, value: Boolean) {
+        sb.append("\"$key\":").append(if (value) "true" else "false").append(",")
+    }
+
+    private fun appendNum(sb: StringBuilder, key: String, value: Number) {
+        sb.append("\"$key\":").append(value.toString()).append(",")
     }
 
     private fun escapeJsonString(value: String): String {
@@ -269,44 +294,59 @@ class SettingsRepository(private val context: Context) {
 
     private fun parseSinglePreset(json: String): com.localassistant.app.domain.model.AppSettings? {
         try {
-            fun extract(key: String): String {
+            // A preset saved by an older build is missing the keys this version
+            // added, so anything absent falls back to the app default rather than
+            // to an empty string, zero, or false.
+            val base = com.localassistant.app.domain.model.AppSettings()
+            fun extract(key: String, default: String): String {
                 // Escape sequences may contain any character, so the value cannot
                 // be matched with a simple "not a backslash or quote" class.
                 val pattern = "\"$key\":\"((?:\\\\.|[^\"\\\\])*)\""
                 val regex = Regex(pattern)
-                return regex.find(json)?.groupValues?.get(1)?.let { unescapeJsonString(it) } ?: ""
+                return regex.find(json)?.groupValues?.get(1)?.let { unescapeJsonString(it) } ?: default
             }
-            fun extractNum(key: String): Double {
-                val pattern = "\"$key\":([0-9.]+)"
+            fun extractNum(key: String, default: Double): Double {
+                val pattern = "\"$key\":(-?[0-9.]+)"
                 val regex = Regex(pattern)
-                return regex.find(json)?.groupValues?.get(1)?.toDouble() ?: 0.0
+                return regex.find(json)?.groupValues?.get(1)?.toDouble() ?: default
             }
-            fun extractBool(key: String): Boolean {
+            fun extractBool(key: String, default: Boolean): Boolean {
                 val pattern = "\"$key\":(true|false)"
                 val regex = Regex(pattern)
-                return regex.find(json)?.groupValues?.get(1) == "true"
+                return regex.find(json)?.groupValues?.get(1)?.let { it == "true" } ?: default
             }
 
             return com.localassistant.app.domain.model.AppSettings(
-                llmBaseUrl = extract("llmBaseUrl"),
-                llmModelName = extract("llmModelName"),
-                llmApiKey = extract("llmApiKey"),
-                sttBaseUrl = extract("sttBaseUrl"),
-                sttModelName = extract("sttModelName"),
-                sttApiKey = extract("sttApiKey"),
-                ttsBaseUrl = extract("ttsBaseUrl"),
-                ttsModelName = extract("ttsModelName"),
-                ttsVoiceName = extract("ttsVoiceName"),
-                ttsApiKey = extract("ttsApiKey"),
-                systemPrompt = extract("systemPrompt"),
-                wakeWordName = extract("wakeWordName"),
-                wakeWordModel = extract("wakeWordModel").ifEmpty { DEFAULT_WAKE_WORD_MODEL },
-                wakeWordSensitivity = extractNum("wakeWordSensitivity").toFloat(),
-                vadSensitivity = extractNum("vadSensitivity").toFloat(),
-                vadMinSilenceDurationMs = extractNum("vadMinSilenceDurationMs").toInt(),
-                enableForegroundService = extractBool("enableForegroundService"),
-                continuousConversationMode = extractBool("continuousConversationMode"),
-                autoStartOnBoot = extractBool("autoStartOnBoot")
+                llmBaseUrl = extract("llmBaseUrl", base.llmBaseUrl),
+                llmModelName = extract("llmModelName", base.llmModelName),
+                llmApiKey = extract("llmApiKey", base.llmApiKey),
+                sttBaseUrl = extract("sttBaseUrl", base.sttBaseUrl),
+                sttModelName = extract("sttModelName", base.sttModelName),
+                sttApiKey = extract("sttApiKey", base.sttApiKey),
+                ttsBaseUrl = extract("ttsBaseUrl", base.ttsBaseUrl),
+                ttsModelName = extract("ttsModelName", base.ttsModelName),
+                ttsVoiceName = extract("ttsVoiceName", base.ttsVoiceName),
+                ttsApiKey = extract("ttsApiKey", base.ttsApiKey),
+                ttsResponseFormat = extract("ttsResponseFormat", base.ttsResponseFormat),
+                enableTtsStreaming = extractBool("enableTtsStreaming", base.enableTtsStreaming),
+                systemPrompt = extract("systemPrompt", base.systemPrompt),
+                wakeWordName = extract("wakeWordName", base.wakeWordName),
+                enableWakeWordDetection = extractBool("enableWakeWordDetection", base.enableWakeWordDetection),
+                wakeWordModel = extract("wakeWordModel", DEFAULT_WAKE_WORD_MODEL),
+                wakeWordSensitivity = extractNum("wakeWordSensitivity", base.wakeWordSensitivity.toDouble()).toFloat(),
+                vadSensitivity = extractNum("vadSensitivity", base.vadSensitivity.toDouble()).toFloat(),
+                vadMinSilenceDurationMs = extractNum("vadMinSilenceDurationMs", base.vadMinSilenceDurationMs.toDouble()).toInt(),
+                continuousConversationMode = extractBool("continuousConversationMode", base.continuousConversationMode),
+                enableForegroundService = extractBool("enableForegroundService", base.enableForegroundService),
+                autoStartOnBoot = extractBool("autoStartOnBoot", base.autoStartOnBoot),
+                batteryOptimizationExempted = extractBool("batteryOptimizationExempted", base.batteryOptimizationExempted),
+                autoTtsEnabled = extractBool("autoTtsEnabled", base.autoTtsEnabled),
+                autoExpandReasoning = extractBool("autoExpandReasoning", base.autoExpandReasoning),
+                darkModeEnabled = extractBool("darkModeEnabled", base.darkModeEnabled),
+                debugLoggingEnabled = extractBool("debugLoggingEnabled", base.debugLoggingEnabled),
+                httpTimeoutSeconds = extractNum("httpTimeoutSeconds", base.httpTimeoutSeconds.toDouble()).toInt(),
+                forceHttps = extractBool("forceHttps", base.forceHttps),
+                preferredLocale = extract("preferredLocale", base.preferredLocale)
             )
         } catch (_: Exception) {
             return null
