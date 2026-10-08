@@ -235,7 +235,7 @@ class SettingsRepository(private val context: Context) {
         appendStr(sb, "ttsModelName", settings.ttsModelName)
         appendStr(sb, "ttsVoiceName", settings.ttsVoiceName)
         appendStr(sb, "ttsApiKey", settings.ttsApiKey)
-        appendStr(sb, "systemPrompt", settings.systemPrompt.replace("\n", "\\n"))
+        appendStr(sb, "systemPrompt", settings.systemPrompt)
         appendStr(sb, "wakeWordName", settings.wakeWordName)
         appendStr(sb, "wakeWordModel", settings.wakeWordModel)
         sb.append("\"wakeWordSensitivity\":${settings.wakeWordSensitivity},")
@@ -249,16 +249,32 @@ class SettingsRepository(private val context: Context) {
     }
 
     private fun appendStr(sb: StringBuilder, key: String, value: String) {
-        val escaped = value.replace("\\", "\\\\").replace("\"", "\\\"")
-        sb.append("\"$key\":\"$escaped\",")
+        sb.append("\"$key\":\"").append(escapeJsonString(value)).append("\",")
+    }
+
+    private fun escapeJsonString(value: String): String {
+        val sb = StringBuilder(value.length)
+        for (c in value) {
+            when (c) {
+                '\\' -> sb.append("\\\\")
+                '"' -> sb.append("\\\"")
+                '\n' -> sb.append("\\n")
+                '\r' -> sb.append("\\r")
+                '\t' -> sb.append("\\t")
+                else -> sb.append(c)
+            }
+        }
+        return sb.toString()
     }
 
     private fun parseSinglePreset(json: String): com.localassistant.app.domain.model.AppSettings? {
         try {
             fun extract(key: String): String {
-                val pattern = "\"$key\":\\\"([^\\\\\"]*)\\\""
+                // Escape sequences may contain any character, so the value cannot
+                // be matched with a simple "not a backslash or quote" class.
+                val pattern = "\"$key\":\"((?:\\\\.|[^\"\\\\])*)\""
                 val regex = Regex(pattern)
-                return regex.find(json)?.groupValues?.get(1)?.replace("\\n", "\n")?.replace("\\\\", "\\") ?: ""
+                return regex.find(json)?.groupValues?.get(1)?.let { unescapeJsonString(it) } ?: ""
             }
             fun extractNum(key: String): Double {
                 val pattern = "\"$key\":([0-9.]+)"
@@ -298,7 +314,9 @@ class SettingsRepository(private val context: Context) {
     }
 
     private fun buildPresetNameList(entries: List<Pair<String, String>>): String {
-        val items = entries.map { (id, name) -> "\"$id\":\"${name.replace("\\", "\\\\").replace("\"", "\\\"")}\"" }
+        val items = entries.map { (id, name) ->
+            "\"${escapeJsonString(id)}\":\"${escapeJsonString(name)}\""
+        }
         return "{${items.joinToString(",")}}"
     }
 
@@ -350,11 +368,35 @@ class SettingsRepository(private val context: Context) {
     private fun parseJsonString(s: String): String {
         val trimmed = s.trim()
         if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
-            return trimmed.substring(1, trimmed.length - 1)
-                .replace("\\\"", "\"")
-                .replace("\\\\", "\\")
+            return unescapeJsonString(trimmed.substring(1, trimmed.length - 1))
         }
         return trimmed
+    }
+
+    private fun unescapeJsonString(s: String): String {
+        val sb = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (c == '\\' && i + 1 < s.length) {
+                when (val n = s[i + 1]) {
+                    'n' -> sb.append('\n')
+                    'r' -> sb.append('\r')
+                    't' -> sb.append('\t')
+                    '"' -> sb.append('"')
+                    '\\' -> sb.append('\\')
+                    else -> {
+                        sb.append('\\')
+                        sb.append(n)
+                    }
+                }
+                i += 2
+            } else {
+                sb.append(c)
+                i++
+            }
+        }
+        return sb.toString()
     }
 
     private fun getDisplayName(id: String): String {
