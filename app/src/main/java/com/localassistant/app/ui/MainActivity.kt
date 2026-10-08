@@ -344,19 +344,12 @@ fun MainNavigation(hasPermissions: Boolean) {
     LaunchedEffect(lastCommand) {
         val command = lastCommand ?: return@LaunchedEffect
         MainActivity._lastVoiceCommand.value = null
-        
-        var settings: com.localassistant.app.domain.model.AppSettings? = null
-        try {
-            viewModel.settings.collect { s -> settings = s }
-        } catch (e: Exception) {
-            android.util.Log.w("MainActivity", "Failed to collect settings: ${e.message}")
-        }
-        if (settings != null && !settings!!.llmBaseUrl.isNullOrBlank()) {
+        if (chatSettings.llmBaseUrl.isNotBlank()) {
             viewModel.sendMessage(
                 text = command,
-                llmBaseUrl = settings!!.llmBaseUrl,
-                apiKey = if (settings!!.llmApiKey.isBlank()) null else settings!!.llmApiKey,
-                model = settings!!.llmModelName
+                llmBaseUrl = chatSettings.llmBaseUrl,
+                apiKey = if (chatSettings.llmApiKey.isBlank()) null else chatSettings.llmApiKey,
+                model = chatSettings.llmModelName
             )
         }
     }
