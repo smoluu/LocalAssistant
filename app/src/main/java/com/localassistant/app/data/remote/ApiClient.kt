@@ -29,8 +29,10 @@ object ApiClient {
             .connectTimeout(timeoutSeconds, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(timeoutSeconds, java.util.concurrent.TimeUnit.SECONDS)
         
-        // Add API key header if provided
-        apiKey?.let { key ->
+        // An empty key means "no authentication" - sending "Bearer " on its own makes
+        // strict servers (llama.cpp for one) answer 400, so only a real key adds the
+        // header. Callers may pass the settings value straight through.
+        apiKey?.takeIf { it.isNotBlank() }?.let { key ->
             builder.addInterceptor { chain ->
                 val original = chain.request()
                 val newRequest = original.newBuilder()
