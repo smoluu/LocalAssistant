@@ -596,7 +596,10 @@ object ApiClient {
                 if (voicesArray != null) {
                     for (i in 0 until voicesArray.length()) {
                         val item = voicesArray.optJSONObject(i)
+                        // qwentts.cpp lists plain names, other servers wrap them in objects -
+                        // accept both so the settings screen always shows real voices.
                         val name = item?.optString("name") ?: item?.optString("id") ?: item?.optString("voice")
+                            ?: if (item == null) voicesArray.optString(i) else null
                         if (!name.isNullOrEmpty()) {
                             voices.add(name)
                             android.util.Log.d("ApiClient", "Found voice: $name")
