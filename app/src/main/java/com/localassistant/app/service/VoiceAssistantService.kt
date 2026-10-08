@@ -531,19 +531,31 @@ class VoiceAssistantService : Service() {
                     return@launch
                 }
                 
-                if (transcribedText.isNotEmpty()) {
-                    _currentMessage.value = transcribedText
-                    
-                    // Process with LLM and respond with TTS
-                    processWithLLMAndRespond(transcribedText)
-                } else {
-                    // Empty transcription - just return to listening
+                if (isNonSpeechTranscript(transcribedText)) {
+                    android.util.Log.d("VoiceAssistantService", "Ignoring non-speech transcript: $transcribedText")
                     _state.value = STATE_LISTENING
                     updateNotification("Listening...")
+                    return@launch
                 }
+
+                _currentMessage.value = transcribedText
+                processWithLLMAndRespond(transcribedText)
             } catch (e: Exception) {
                 handleError("Voice processing error: ${e.message}")
             }
+        }
+    }
+
+    /**
+     * whisper.cpp answers non-speech with bracketed tokens ("[MUSIC]", "[BLANK_AUDIO]")
+     * instead of an empty transcript, and the always-on service would otherwise send
+     * those to the LLM as if they were a request.
+     */
+    private fun isNonSpeechTranscript(text: String): Boolean {
+        val tokens = text.trim().split(" ").filter { it.isNotEmpty() }
+        if (tokens.isEmpty()) return true
+        return tokens.all {
+            (it.startsWith("[") && it.endsWith("]")) || (it.startsWith("(") && it.endsWith(")"))
         }
     }
 
