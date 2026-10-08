@@ -88,7 +88,7 @@ fun ChatScreen(
     // Auto-scroll to bottom when new messages or streaming content arrives
     var ttsPlayedMessageIndex by remember { mutableIntStateOf(-1) }
 
-    LaunchedEffect(messages.size, streamingContent.value, streamingReasoning.value) {
+    LaunchedEffect(messages.size, streamingContent.value, streamingReasoning.value, settings) {
         val totalItems = lazyListState.layoutInfo.totalItemsCount
         val isStreaming = streamingContent.value.isNotEmpty() || streamingReasoning.value.isNotEmpty()
         // Auto-scroll to the bottom while the AI is responding, and whenever the
