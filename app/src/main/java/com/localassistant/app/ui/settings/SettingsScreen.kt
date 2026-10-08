@@ -162,6 +162,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, viewModel: SettingsViewModel = vi
     val ttsTesting by viewModel.ttsTesting.collectAsState()
     val wakeWordStatus by viewModel.wakeWordStatus.collectAsState()
     val wakeWordTesting by viewModel.wakeWordTesting.collectAsState()
+    val savedPresets by viewModel.presets.collectAsState()
 
     var showClearDataDialog by remember { mutableStateOf(false) }
     var showFactoryResetDialog by remember { mutableStateOf(false) }
@@ -290,6 +291,43 @@ fun SettingsScreen(onNavigateBack: () -> Unit, viewModel: SettingsViewModel = vi
                         android.widget.Toast.makeText(context, "Endpoints copied!", android.widget.Toast.LENGTH_SHORT).show()
                     }, modifier = Modifier.weight(1f)) { Text("Copy Endpoints") }
                     Button(onClick = { showSavePresetDialog = true }, modifier = Modifier.weight(1f)) { Text("Save Preset") }
+                }
+            }
+
+            SettingsSection("Saved Presets", "🗂️", "Apply or remove a configuration you stored earlier") {
+                if (savedPresets.isEmpty()) {
+                    Text(
+                        text = "No presets saved yet - use Save Preset above to store the current settings.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                savedPresets.forEach { preset ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = preset.name,
+                            maxLines = 1,
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Button(
+                            onClick = {
+                                viewModel.loadPreset(preset)
+                                android.widget.Toast.makeText(context, "Preset '${preset.name}' applied!", android.widget.Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("Apply") }
+                        Button(
+                            onClick = { viewModel.deletePreset(preset.id) },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                        ) { Text("Delete") }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
                 }
             }
         }

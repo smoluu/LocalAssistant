@@ -127,13 +127,18 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     // ==================== Preset Management ====================
 
-    private val presetList = MutableStateFlow<List<PresetEntry>>(emptyList())
+    // Presets live in SharedPreferences, so the list is read back on startup -
+    // otherwise a preset saved in an earlier session could never be shown again.
+    private val presetList = MutableStateFlow<List<PresetEntry>>(repository.getAllPresets())
     val presets: StateFlow<List<PresetEntry>> = presetList.asStateFlow()
 
     /**
      * Save current settings as a named preset.
      */
     fun savePreset(name: String) {
+        // Re-using a name replaces the old snapshot on disk too. The repository keys
+        // presets by id, so keeping the stale copy would list two presets with one name.
+        presetList.value.firstOrNull { it.name == name }?.let { repository.deletePreset(it.id) }
         val entry = PresetEntry(
             id = UUID.randomUUID().toString(),
             name = name,
@@ -151,11 +156,16 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     /**
-     * Load a preset by name, updating current settings.
+     * Load a preset, updating current settings.
      */
     fun loadPreset(preset: PresetEntry) {
         _settings.value = preset.settings
         repository.updateSettings(_settings.value)
+        // A preset carries its own base URLs, so the previous health checks no longer
+        // describe the endpoints that are now configured.
+        _llmStatus.value = null
+        _sttStatus.value = null
+        _ttsStatus.value = null
     }
 
     /**
