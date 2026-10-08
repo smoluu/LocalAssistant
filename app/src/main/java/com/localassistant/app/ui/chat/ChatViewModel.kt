@@ -217,6 +217,10 @@ class ChatViewModel(application: android.app.Application) : AndroidViewModel(app
      */
     private companion object {
         const val SUMMARY_THRESHOLD = 50
+        // The collapsed history has to stay below SUMMARY_THRESHOLD, otherwise the
+        // trigger in ChatScreen can never fire a second time and the conversation
+        // grows without bound.
+        const val SUMMARY_KEEP = 20
     }
 
     /**
@@ -225,14 +229,14 @@ class ChatViewModel(application: android.app.Application) : AndroidViewModel(app
      * When the number of messages exceeds [SUMMARY_THRESHOLD], this method uses the LLM API
      * to create a concise summary of older messages, keeping only recent context in memory.
      */
-    fun maybeSummarizeConversation(llmBaseUrl: String?, apiKey: String?, model: String?) {
+    fun maybeSummarizeConversation(llmBaseUrl: String, apiKey: String?, model: String, timeoutSeconds: Long) {
         viewModelScope.launch {
             val currentMessages = _messages.value
-            if (currentMessages.size > SUMMARY_THRESHOLD && llmBaseUrl != null && model != null) {
+            if (currentMessages.size > SUMMARY_THRESHOLD) {
                 android.util.Log.d("ChatViewModel", "Conversation has ${currentMessages.size} messages, triggering summarization...")
                 try {
-                    // Keep the last 50 messages, summarize the rest
-                    val keepCount = 50
+                    // Keep the last SUMMARY_KEEP messages, summarize the rest
+                    val keepCount = SUMMARY_KEEP
                     val messagesToSummarize = currentMessages.take(currentMessages.size - keepCount)
                     val recentMessages = currentMessages.takeLast(keepCount)
 
@@ -256,7 +260,8 @@ class ChatViewModel(application: android.app.Application) : AndroidViewModel(app
                         apiKey = apiKey,
                         messages = messagesList,
                         model = model,
-                        stream = false
+                        stream = false,
+                        timeoutSeconds = timeoutSeconds
                     )
                     val summaryText = summaryResponse.content.trim()
 

@@ -128,21 +128,17 @@ fun ChatScreen(
 
     // Conversation summarization state - trigger when message count exceeds threshold
     var showSummarizedNotification by remember { mutableStateOf(false) }
-    var lastMessageCount by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(messages.size) {
-        if (messages.size > SUMMARY_THRESHOLD && messages.size != lastMessageCount) {
-            // Only trigger once when crossing the threshold
-            if (messages.size == SUMMARY_THRESHOLD + 1) {
-                android.util.Log.d("ChatScreen", "Conversation exceeded $SUMMARY_THRESHOLD messages, summarizing...")
-                showSummarizedNotification = true
-                viewModel.maybeSummarizeConversation(
-                    llmBaseUrl = settings?.llmBaseUrl,
-                    apiKey = if (settings!!.llmApiKey.isBlank()) null else settings!!.llmApiKey,
-                    model = settings?.llmModelName
-                )
-            }
-            lastMessageCount = messages.size
+        if (messages.size > SUMMARY_THRESHOLD) {
+            android.util.Log.d("ChatScreen", "Conversation exceeded $SUMMARY_THRESHOLD messages, summarizing...")
+            showSummarizedNotification = true
+            viewModel.maybeSummarizeConversation(
+                llmBaseUrl = settings.llmBaseUrl,
+                apiKey = if (settings.llmApiKey.isBlank()) null else settings.llmApiKey,
+                model = settings.llmModelName,
+                timeoutSeconds = settings.httpTimeoutSeconds.toLong()
+            )
         }
     }
 
