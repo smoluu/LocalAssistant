@@ -23,7 +23,7 @@ import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.foundation.clickable
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -275,9 +275,9 @@ fun ChatScreen(
                                     },
                                     onClick = { menuExpanded = false }
                                 )
-                                
-                                Divider()
-                                
+
+                                HorizontalDivider()
+
                                 // Clear history
                                 DropdownMenuItem(
                                     text = { Text("Clear History") },
@@ -317,12 +317,12 @@ fun ChatScreen(
                     textInput = textInput,
                     onTextInputChange = { textInput = it },
                     onSendText = { text ->
-                        if (text.isNotBlank() && settings != null) {
+                        if (text.isNotBlank()) {
                             viewModel.sendMessage(
                                 text,
-                                settings!!.llmBaseUrl,
-                                if (settings!!.llmApiKey.isBlank()) null else settings!!.llmApiKey,
-                                settings!!.llmModelName
+                                settings.llmBaseUrl,
+                                if (settings.llmApiKey.isBlank()) null else settings.llmApiKey,
+                                settings.llmModelName
                             )
                             textInput = ""
                         }
@@ -332,13 +332,7 @@ fun ChatScreen(
                         isRecording = true
                         recordedAudioBytes = null
                         recordingStopSignal.set(false)
-                        
-                        if (settings == null) {
-                            Toast.makeText(context.applicationContext, "Please configure settings first", Toast.LENGTH_LONG).show()
-                            isRecording = false
-                            return@VoiceControlsBar
-                        }
-                        
+
                         coroutineScope.launch {
                             try {
                                 viewModel.setServiceState("listening")
@@ -1077,7 +1071,7 @@ private fun VoiceControlsBar(
                                 modifier = Modifier.size(10.dp),
                                 strokeWidth = 1.5.dp,
                                 color = MaterialTheme.colorScheme.error,
-                                progress = 1f
+                                progress = { 1f }
                             )
                         }
                         Spacer(modifier = Modifier.width(4.dp))
@@ -1092,7 +1086,7 @@ private fun VoiceControlsBar(
                         modifier = Modifier.size(12.dp),
                         strokeWidth = 1.5.dp,
                         color = MaterialTheme.colorScheme.primary,
-                        progress = 0.7f
+                        progress = { 0.7f }
                     )
                 }
             }
@@ -1127,7 +1121,7 @@ private fun VoiceControlsBar(
                         modifier = Modifier.size(40.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Send,
+                            imageVector = Icons.AutoMirrored.Filled.Send,
                             contentDescription = "Send",
                             tint = if (isSendingText) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface,
                             modifier = Modifier.size(20.dp)

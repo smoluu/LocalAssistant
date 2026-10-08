@@ -930,79 +930,11 @@ class VoiceAssistantService : Service() {
         stopListening()
     }
     
-    // ==================== Wake Word Detection Integration Point ====================
-
-    /**
-     * Placeholder method for wake word detection integration.
-     *
-     * This method is called periodically with raw audio bytes to check if the user's
-     * wake word has been detected. By default, it returns false (no wake word support).
-     *
-     * To integrate an external wake word library:
-     *
-     * 1. Add the wake word library dependency (e.g., Porcupine or Snowboy)
-     *    to your build.gradle.kts:
-     *
-     *    // For Porcupine (Picovoice):
-     *    implementation("ai.picovoice:porcupine-android:x.y.z")
-     *
-     * 2. Initialize the wake word engine in onCreate():
-     *
-     *    private var porcupine: Porcupine? = null
-     *
-     *    override fun onCreate() {
-     *        super.onCreate()
-     *        // ... existing init code ...
-     *        try {
-     *            val accessKey = getSharedPreferences("app_prefs", MODE_PRIVATE)
-     *                .getString("porcupine_access_key", "")
-     *            if (accessKey.isNotBlank()) {
-     *                porcupine = PorcupineBuilder()
-     *                    .setAccessKey(accessKey)
-     *                    .setModelPath("/path/to/porcupine.ppn")
-     *                    .setKeywordPath("/path/to/keyword.ppn")
-     *                    .build()
-     *            }
-     *        } catch (e: Exception) {
-     *            android.util.Log.w("VoiceAssistantService", "Wake word init failed: ${e.message}")
-     *        }
-     *    }
-     *
-     * 3. Override this method to call the wake word engine:
-     *
-     *    override fun detectWakeWord(audioBytes: ByteArray): Boolean {
-     *        return try {
-     *            porcupine?.process(
-     *                ShortArray(audioBytes.size / 2).apply {
-     *                    for (i in indices) {
-     *                        this[i] = ((audioBytes[i * 2].toInt() and 0xFF) or
-     *                                (audioBytes[i * 2 + 1].toInt() shl 8)).toShort()
-     *                    }
-     *                }
-     *            ) != -1
-     *        } catch (e: Exception) {
-     *            android.util.Log.w("VoiceAssistantService", "Wake word detection failed: ${e.message}")
-     *            false
-     *        }
-     *    }
-     *
-     * 4. Call this method from the audio processing loop:
-     *
-     *    if (detectWakeWord(audioBytes)) {
-     *        android.util.Log.d("VoiceAssistantService", "Wake word detected!")
-     *        _state.value = STATE_LISTENING
-     *        // Continue listening for command...
-     *    }
-     *
-     * @param audioBytes Raw PCM audio bytes (16-bit, 16kHz mono) to analyze
-     * @return true if the wake word was detected, false otherwise
-     */
-    open fun detectWakeWord(audioBytes: ByteArray): Boolean {
-        // Default implementation: no wake word detection
-        // Override this method in a subclass or anonymous object to integrate
-        // external wake word libraries like Porcupine (Picovoice) or Snowboy
-        return false
-    }
+    // ==================== Wake Word Detection ====================
+    //
+    // Wake matching is transcript-based (CommonUtilities.matchesWakeWord, used by
+    // WakeChatViewModel). An on-device keyword runtime would plug in here, but its
+    // licence and on-device footprint must be checked before adding one.
 
     // ==================== Energy-Saving Mode ====================
 
