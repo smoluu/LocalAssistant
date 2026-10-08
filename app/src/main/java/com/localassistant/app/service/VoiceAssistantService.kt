@@ -522,7 +522,8 @@ class VoiceAssistantService : Service() {
                             baseUrl = sttBaseUrl,
                             apiKey = apiKey,
                             audioData = wavBytes,
-                            model = model
+                            model = model,
+                            timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
                         )
                     }
                 } catch (e: Exception) {
@@ -602,7 +603,8 @@ class VoiceAssistantService : Service() {
                         messages = messagesList,
                         model = model,
                         stream = false,
-                        systemPrompt = currentSettings.systemPrompt
+                        systemPrompt = currentSettings.systemPrompt,
+                        timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
                     )
                 }
                 responseText = response.content
@@ -634,7 +636,8 @@ class VoiceAssistantService : Service() {
                                 text = responseText,
                                 model = currentSettings.ttsModelName,
                                 voice = currentSettings.ttsVoiceName,
-                                responseFormat = currentSettings.ttsResponseFormat
+                                responseFormat = currentSettings.ttsResponseFormat,
+                                timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
                             )
                         }
                     } catch (e: Exception) {
@@ -780,7 +783,8 @@ class VoiceAssistantService : Service() {
                         text = nextText,
                         model = currentSettings.ttsModelName,
                         voice = currentSettings.ttsVoiceName,
-                        responseFormat = currentSettings.ttsResponseFormat
+                        responseFormat = currentSettings.ttsResponseFormat,
+                        timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
                     )
                 }
             } catch (e: Exception) {

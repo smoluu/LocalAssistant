@@ -432,6 +432,7 @@ fun splitIntoSentences(text: String): List<String> {
  * @param model TTS model name from settings.
  * @param voice Voice name from settings.
  * @param enableStreaming Whether to use streaming TTS playback.
+ * @param timeoutSeconds HTTP timeout for each synthesis request, from the app settings.
  */
  suspend fun playTTSAudio(
      text: String?,
@@ -439,7 +440,8 @@ fun splitIntoSentences(text: String): List<String> {
      model: String = "tts-1-hd",
      voice: String? = null,
      responseFormat: String = "mp3",
-     enableStreaming: Boolean = false
+     enableStreaming: Boolean = false,
+     timeoutSeconds: Long
  ) {
      if (text == null || ttsSettings?.first == null) {
          return
@@ -461,8 +463,8 @@ fun splitIntoSentences(text: String): List<String> {
          if (sentences.size > 1) {
              var played = false
              for (sentence in sentences) {
-                 val chunk = fetchTtsAudio(ttsBaseUrl, ttsApiKey, sentence, model, voice, responseFormat)
-                     ?: fetchTtsAudio(ttsBaseUrl, ttsApiKey, sentence, model, null, responseFormat)
+                 val chunk = fetchTtsAudio(ttsBaseUrl, ttsApiKey, sentence, model, voice, responseFormat, timeoutSeconds)
+                     ?: fetchTtsAudio(ttsBaseUrl, ttsApiKey, sentence, model, null, responseFormat, timeoutSeconds)
                  if (chunk != null && chunk.isNotEmpty() && playAudioBytes(chunk)) {
                      played = true
                  }
@@ -476,8 +478,8 @@ fun splitIntoSentences(text: String): List<String> {
          // Download the full audio. Many local TTS servers (e.g. Piper proxies)
          // reject the `voice` field with HTTP 400, so if the first request fails
          // we retry without a voice to fall back to the server's default voice.
-         val audioBytes = fetchTtsAudio(ttsBaseUrl, ttsApiKey, cleanText, model, voice, responseFormat)
-             ?: fetchTtsAudio(ttsBaseUrl, ttsApiKey, cleanText, model, null, responseFormat)
+         val audioBytes = fetchTtsAudio(ttsBaseUrl, ttsApiKey, cleanText, model, voice, responseFormat, timeoutSeconds)
+             ?: fetchTtsAudio(ttsBaseUrl, ttsApiKey, cleanText, model, null, responseFormat, timeoutSeconds)
 
          if (audioBytes == null || audioBytes.isEmpty()) {
              android.util.Log.e("TTS", "TTS produced no audio")
@@ -490,7 +492,7 @@ fun splitIntoSentences(text: String): List<String> {
          // decode as wav, so retry once in the format the player is known to handle.
          if (responseFormat != "wav") {
              android.util.Log.w("TTS", "Could not play $responseFormat, retrying as wav")
-             val wav = fetchTtsAudio(ttsBaseUrl, ttsApiKey, cleanText, model, null, "wav")
+             val wav = fetchTtsAudio(ttsBaseUrl, ttsApiKey, cleanText, model, null, "wav", timeoutSeconds)
              if (wav != null && wav.isNotEmpty()) {
                  playAudioBytes(wav)
              }
@@ -509,7 +511,8 @@ private suspend fun fetchTtsAudio(
     text: String,
     model: String,
     voice: String?,
-    responseFormat: String = "mp3"
+    responseFormat: String = "mp3",
+    timeoutSeconds: Long
 ): ByteArray? {
     return try {
         com.localassistant.app.data.remote.ApiClient.synthesizeSpeech(
@@ -518,7 +521,8 @@ private suspend fun fetchTtsAudio(
             text = text,
             model = model,
             voice = voice,
-            responseFormat = responseFormat
+            responseFormat = responseFormat,
+            timeoutSeconds = timeoutSeconds
         )
     } catch (e: Exception) {
         android.util.Log.w("TTS", "TTS request failed (voice=${voice ?: "none"}, format=$responseFormat): ${e.message}")

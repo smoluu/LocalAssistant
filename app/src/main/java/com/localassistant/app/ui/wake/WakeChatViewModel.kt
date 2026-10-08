@@ -144,7 +144,8 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
                     model = currentSettings.ttsModelName,
                     voice = currentSettings.ttsVoiceName,
                     responseFormat = currentSettings.ttsResponseFormat,
-                    enableStreaming = currentSettings.enableTtsStreaming
+                    enableStreaming = currentSettings.enableTtsStreaming,
+                    timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
                 )
             }
             _phase.value = "detecting"
@@ -167,7 +168,8 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
                     baseUrl = currentSettings.sttBaseUrl,
                     apiKey = if (currentSettings.sttApiKey.isBlank()) null else currentSettings.sttApiKey,
                     audioData = wavBytes,
-                    model = currentSettings.sttModelName
+                    model = currentSettings.sttModelName,
+                    timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
                 )
             }
         } catch (e: Exception) {
@@ -193,7 +195,8 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
                 apiKey = if (currentSettings.llmApiKey.isBlank()) null else currentSettings.llmApiKey,
                 messages = history,
                 model = currentSettings.llmModelName,
-                systemPrompt = currentSettings.systemPrompt
+                systemPrompt = currentSettings.systemPrompt,
+                timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
             ).content
         } catch (e: Exception) {
             android.util.Log.w("WakeChat", "LLM failed: ${e.message}")

@@ -124,7 +124,8 @@ class ChatViewModel(application: android.app.Application) : AndroidViewModel(app
                     messages = messagesList,
                     model = model,
                     stream = true,
-                    systemPrompt = settings.value.systemPrompt
+                    systemPrompt = settings.value.systemPrompt,
+                    timeoutSeconds = settings.value.httpTimeoutSeconds.toLong()
                 ) { chunk: String ->
                     // Reasoning chunks are prefixed with the \u0001 separator -
                     // keep them out of the visible content

@@ -111,7 +111,8 @@ fun ChatScreen(
                         model = settings.ttsModelName,
                         voice = settings.ttsVoiceName,
                         responseFormat = settings.ttsResponseFormat,
-                        enableStreaming = settings.enableTtsStreaming
+                        enableStreaming = settings.enableTtsStreaming,
+                        timeoutSeconds = settings.httpTimeoutSeconds.toLong()
                     )
                     ttsPlayedMessageIndex = lastIdx
                 }
@@ -359,7 +360,8 @@ fun ChatScreen(
                                                 baseUrl = settings.sttBaseUrl,
                                                 apiKey = if (settings.sttApiKey.isBlank()) null else settings.sttApiKey,
                                                 audioData = wavBytes,
-                                                model = settings.sttModelName
+                                                model = settings.sttModelName,
+                                                timeoutSeconds = settings.httpTimeoutSeconds.toLong()
                                             )
                                         }
 
@@ -384,7 +386,8 @@ fun ChatScreen(
                                                     messages = history,
                                                     model = settings.llmModelName,
                                                     stream = true,
-                                                    systemPrompt = settings.systemPrompt
+                                                    systemPrompt = settings.systemPrompt,
+                                                    timeoutSeconds = settings.httpTimeoutSeconds.toLong()
                                                 ) { chunk: String ->
                                                     if (chunk.startsWith("\u0001")) {
                                                         reasoningContent.append(chunk.substring(1))
@@ -550,6 +553,7 @@ fun ChatScreen(
                                         ttsModel = settings?.ttsModelName ?: "piper-en",
                                         ttsVoice = settings?.ttsVoiceName ?: "en_US-ryan-high",
                                         ttsResponseFormat = settings?.ttsResponseFormat ?: "mp3",
+                                        ttsTimeoutSeconds = settings.httpTimeoutSeconds.toLong(),
                                         autoExpandReasoning = settings?.autoExpandReasoning ?: true,
                                         onUnpin = {
                                             viewModel.unpinMessage(message.id)
@@ -609,6 +613,7 @@ fun ChatScreen(
                                     ttsModel = settings?.ttsModelName ?: "piper-en",
                                     ttsVoice = settings?.ttsVoiceName ?: "en_US-ryan-high",
                                     ttsResponseFormat = settings?.ttsResponseFormat ?: "mp3",
+                                    ttsTimeoutSeconds = settings.httpTimeoutSeconds.toLong(),
                                     autoExpandReasoning = settings?.autoExpandReasoning ?: true,
                                     onPin = {
                                         viewModel.pinMessage(message)
@@ -711,6 +716,7 @@ internal fun MessageBubble(
     ttsModel: String = "piper-en",
     ttsVoice: String = "en_US-ryan-high",
     ttsResponseFormat: String = "mp3",
+    ttsTimeoutSeconds: Long = 60L,
     autoExpandReasoning: Boolean = true,
     onPin: (() -> Unit)? = null,
     onUnpin: (() -> Unit)? = null
@@ -864,7 +870,8 @@ internal fun MessageBubble(
                                         ttsSettings,
                                         model = ttsModel,
                                         voice = ttsVoice,
-                                        responseFormat = ttsResponseFormat
+                                        responseFormat = ttsResponseFormat,
+                                        timeoutSeconds = ttsTimeoutSeconds
                                     )
                                 } catch (e: Exception) {
                                     android.util.Log.e("ChatScreen", "TTS playback failed: ${e.message}")
