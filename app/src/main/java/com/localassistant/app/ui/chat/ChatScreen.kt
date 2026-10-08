@@ -545,12 +545,12 @@ fun ChatScreen(
                                     MessageBubble(
                                         message = message,
                                         isPinned = true,
-                                        ttsSettings = Pair(settings?.ttsBaseUrl, if (settings?.ttsApiKey.isNullOrEmpty()) null else settings.ttsApiKey),
-                                        ttsModel = settings?.ttsModelName ?: "piper-en",
-                                        ttsVoice = settings?.ttsVoiceName ?: "en_US-ryan-high",
-                                        ttsResponseFormat = settings?.ttsResponseFormat ?: "mp3",
+                                        ttsSettings = Pair(settings.ttsBaseUrl, if (settings.ttsApiKey.isBlank()) null else settings.ttsApiKey),
+                                        ttsModel = settings.ttsModelName,
+                                        ttsVoice = settings.ttsVoiceName,
+                                        ttsResponseFormat = settings.ttsResponseFormat,
                                         ttsTimeoutSeconds = settings.httpTimeoutSeconds.toLong(),
-                                        autoExpandReasoning = settings?.autoExpandReasoning ?: true,
+                                        autoExpandReasoning = settings.autoExpandReasoning,
                                         onUnpin = {
                                             viewModel.unpinMessage(message.id)
                                             pinnedMessages = loadPinnedMessages(context.applicationContext)
@@ -605,12 +605,12 @@ fun ChatScreen(
                                 MessageBubble(
                                     message = message,
                                     isPinned = false,
-                                    ttsSettings = Pair(settings?.ttsBaseUrl, if (settings?.ttsApiKey.isNullOrEmpty()) null else settings.ttsApiKey),
-                                    ttsModel = settings?.ttsModelName ?: "piper-en",
-                                    ttsVoice = settings?.ttsVoiceName ?: "en_US-ryan-high",
-                                    ttsResponseFormat = settings?.ttsResponseFormat ?: "mp3",
+                                    ttsSettings = Pair(settings.ttsBaseUrl, if (settings.ttsApiKey.isBlank()) null else settings.ttsApiKey),
+                                    ttsModel = settings.ttsModelName,
+                                    ttsVoice = settings.ttsVoiceName,
+                                    ttsResponseFormat = settings.ttsResponseFormat,
                                     ttsTimeoutSeconds = settings.httpTimeoutSeconds.toLong(),
-                                    autoExpandReasoning = settings?.autoExpandReasoning ?: true,
+                                    autoExpandReasoning = settings.autoExpandReasoning,
                                     onPin = {
                                         viewModel.pinMessage(message)
                                         pinnedMessages = loadPinnedMessages(context.applicationContext)
@@ -631,7 +631,7 @@ fun ChatScreen(
                                     StreamingResponseIndicator(
                                         content = streamingContent.value,
                                         reasoningContent = streamingReasoning.value,
-                                        ttsSettings = Pair(settings?.ttsBaseUrl, if (settings?.ttsApiKey.isNullOrEmpty()) null else settings.ttsApiKey)
+                                        ttsSettings = Pair(settings.ttsBaseUrl, if (settings.ttsApiKey.isBlank()) null else settings.ttsApiKey)
                                     )
                                 }
                             }
