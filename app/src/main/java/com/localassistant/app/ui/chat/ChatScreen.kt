@@ -37,6 +37,7 @@ import com.localassistant.app.R
 import com.localassistant.app.ui.common.exportChatToJsonFile
 import com.localassistant.app.ui.common.exportChatToTextFile
 import com.localassistant.app.ui.common.formatRelativeTime
+import com.localassistant.app.ui.common.isNonSpeechTranscript
 import com.localassistant.app.ui.common.loadPinnedMessages
 import com.localassistant.app.ui.common.playTTSAudio
 import com.localassistant.app.ui.common.recordAudioWithVAD
@@ -176,8 +177,8 @@ fun ChatScreen(
                             AudioFormat.ENCODING_PCM_16BIT
                         )
                         
-                        if (minBufferSize <= 0 || minBufferSize > numSamples * 2) continue
-                        
+                        if (minBufferSize <= 0) continue
+
                         audioTrack = android.media.AudioTrack(
                             AudioAttributes.Builder()
                                 .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
@@ -188,20 +189,28 @@ fun ChatScreen(
                                 .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                                 .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                                 .build(),
-                            minBufferSize,
+                            minBufferSize * 4,
                             android.media.AudioTrack.MODE_STREAM,
                             0
                         )
-                        
+
                         if (audioTrack?.state != android.media.AudioTrack.STATE_INITIALIZED) {
                             audioTrack?.release()
                             audioTrack = null
                             continue
                         }
-                        
-                        audioTrack.write(buffer, 0, numSamples)
+
+                        // write() only works while the track is PLAYING, and the tone is
+                        // longer than the internal buffer, so write it in chunks and let
+                        // flush() wait for playback instead of stalling the frame.
                         audioTrack.play()
-                        Thread.sleep(120L)
+                        var toneWritten = 0
+                        while (toneWritten < numSamples) {
+                            val written = audioTrack.write(buffer, toneWritten, numSamples - toneWritten)
+                            if (written <= 0) break
+                            toneWritten += written
+                        }
+                        audioTrack.flush()
                         audioTrack.stop()
                         audioTrack.release()
                         break
@@ -363,7 +372,14 @@ fun ChatScreen(
 
                                         isRecording = false
 
-                                        if (transcribedText.isNotBlank()) {
+                                        // whisper.cpp answers silence with markers like [BLANK_AUDIO]; they must not
+                                        // become a user message or reach the LLM (same guard as the other services).
+                                        val nonSpeech = isNonSpeechTranscript(transcribedText)
+                                        if (nonSpeech) {
+                                            android.util.Log.d("ChatScreen", "Ignoring non-speech transcript: $transcribedText")
+                                        }
+
+                                        if (!nonSpeech && transcribedText.isNotBlank()) {
                                             android.util.Log.d("ChatScreen", "STT result: $transcribedText")
                                             viewModel.addMessage(com.localassistant.app.domain.model.MessageRole.USER, transcribedText)
 
