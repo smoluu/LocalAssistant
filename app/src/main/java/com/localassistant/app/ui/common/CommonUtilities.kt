@@ -290,7 +290,9 @@ fun parseWavBytes(data: ByteArray): Pair<Int, ByteArray>? {
             return null
         }
         val chunkSize = le32(offset + 4)
-        offset += 8 + (chunkSize and 1) // chunk sizes are padded to even bytes
+        // Skip the whole chunk, padded to an even byte count - stepping by only the
+        // 8-byte header lands inside the chunk data and misreads it as a chunk name.
+        offset += 8 + chunkSize + (chunkSize and 1)
     }
 
     // Fallback: standard 44-byte header layout
