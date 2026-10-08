@@ -29,9 +29,10 @@ import androidx.navigation.compose.composable
 import com.localassistant.app.R
 import com.localassistant.app.data.settings.SettingsRepository
 import com.localassistant.app.ui.chat.ChatScreen
-import com.localassistant.app.ui.chat.QuickChatScreen
 import com.localassistant.app.ui.settings.SettingsScreen
 import com.localassistant.app.ui.theme.LocalAssistantTheme
+import com.localassistant.app.ui.wake.WakeChatScreen
+import com.localassistant.app.ui.wake.WakeChatViewModel
 import android.view.KeyEvent
 import java.util.Locale
 import androidx.compose.animation.AnimatedVisibility
@@ -323,11 +324,12 @@ private fun LoadingScreen() {
 fun MainNavigation(hasPermissions: Boolean) {
     val navController = androidx.navigation.compose.rememberNavController()
     val context = LocalContext.current
-    var showQuickChat by remember { mutableStateOf(false) }
+    val viewModel = androidx.lifecycle.viewmodel.compose.viewModel<com.localassistant.app.ui.chat.ChatViewModel>()
+    val wakeViewModel = androidx.lifecycle.viewmodel.compose.viewModel<com.localassistant.app.ui.wake.WakeChatViewModel>()
+    val chatSettings by viewModel.settings.collectAsState()
 
     // Observe incoming voice commands and add them to chat
     var lastCommand by remember { mutableStateOf<String?>(null) }
-    val viewModel = androidx.lifecycle.viewmodel.compose.viewModel<com.localassistant.app.ui.chat.ChatViewModel>()
     
     LaunchedEffect(Unit) {
         MainActivity._lastVoiceCommand.collect { cmd ->
@@ -397,42 +399,17 @@ fun MainNavigation(hasPermissions: Boolean) {
         }
     }
 
-    // Floating Quick Chat trigger button (visible when QuickChat is NOT open)
-    AnimatedVisibility(
-        visible = !showQuickChat,
-        enter = scaleIn() + fadeIn(),
-        exit = fadeOut() + scaleOut()
-    ) {
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.BottomEnd
-        ) {
-            Column(
-                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 86.dp),
-                verticalArrangement = Arrangement.Bottom,
-                horizontalAlignment = Alignment.End
-            ) {
-                FloatingActionButton(
-                    onClick = { 
-                        performHapticFeedback(context)
-                        showQuickChat = true 
-                    },
-                    modifier = Modifier.size(56.dp),
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.background
-                ) {
-                    Icon(Icons.Default.Mic, contentDescription = "Quick Chat")
-                }
-            }
+    // Wake-word chat service: always listening while enabled, so the user never
+    // has to tap anything. The card rises from the bottom when the phrase is heard.
+    LaunchedEffect(chatSettings.enableWakeWordDetection, hasPermissions) {
+        if (chatSettings.enableWakeWordDetection && hasPermissions) {
+            wakeViewModel.startListening()
+        } else {
+            wakeViewModel.stopListening()
         }
     }
 
-    // QuickChat Modal Bottom Sheet (shown when triggered)
-    if (showQuickChat) {
-        QuickChatScreen(
-            onDismiss = { showQuickChat = false }
-        )
-    }
+    WakeChatScreen(wakeViewModel)
 }
 
 /**

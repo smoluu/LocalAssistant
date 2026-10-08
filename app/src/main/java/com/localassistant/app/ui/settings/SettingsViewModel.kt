@@ -6,6 +6,7 @@ import com.localassistant.app.data.remote.ApiClient
 import com.localassistant.app.data.settings.SettingsRepository
 import com.localassistant.app.ui.common.buildSilentWav
 import com.localassistant.app.ui.common.loadBundledTestAudio
+import com.localassistant.app.ui.common.matchesWakeWord
 import com.localassistant.app.ui.common.playAudioBytes
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -86,6 +87,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
             "wakeWordName" -> _settings.update { it.copy(wakeWordName = value as String) }
             "wakeWordSensitivity" -> _settings.update { it.copy(wakeWordSensitivity = value as Float) }
+            "wakeWordModel" -> _settings.update { it.copy(wakeWordModel = value as String) }
+            "enableWakeWordDetection" -> _settings.update { it.copy(enableWakeWordDetection = value as Boolean) }
 
             "vadSensitivity" -> _settings.update { it.copy(vadSensitivity = value as Float) }
             "vadMinSilenceDurationMs" -> _settings.update { it.copy(vadMinSilenceDurationMs = value as Int) }
@@ -213,6 +216,12 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     private val _ttsTesting = MutableStateFlow(false)
     val ttsTesting: StateFlow<Boolean> = _ttsTesting.asStateFlow()
+
+    private val _wakeWordStatus = MutableStateFlow<EndpointStatus?>(null)
+    val wakeWordStatus: StateFlow<EndpointStatus?> = _wakeWordStatus.asStateFlow()
+
+    private val _wakeWordTesting = MutableStateFlow(false)
+    val wakeWordTesting: StateFlow<Boolean> = _wakeWordTesting.asStateFlow()
 
     /**
      * Names the failure the way the user should see it: the exception type plus
@@ -481,6 +490,49 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             return "Voice '${currentSettings.ttsVoiceName}' is not valid here and this endpoint offers no voices - it will use its default"
         } catch (e: Exception) {
             return "Voice '${currentSettings.ttsVoiceName}' is not valid here (voice listing unavailable)"
+        }
+    }
+
+    /**
+     * Runs the wake-word pipeline end to end: the STT endpoint transcribes the
+     * bundled sample and the result is fed to the matcher, exactly as the
+     * foreground service does it. The sample never contains the wake word, so a
+     * "not heard" verdict still means both halves of the pipeline work.
+     */
+    fun runWakeWordTest() {
+        val currentSettings = _settings.value
+        _wakeWordTesting.value = true
+        viewModelScope.launch {
+            try {
+                val sample = loadBundledTestAudio(appContext)
+                if (sample.isEmpty()) {
+                    _wakeWordStatus.value = EndpointStatus(false, "Bundled test audio (assets/voice_clone.wav) is missing")
+                } else {
+                    val transcript = ApiClient.transcribeAudio(
+                        currentSettings.sttBaseUrl,
+                        if (currentSettings.sttApiKey.isBlank()) null else currentSettings.sttApiKey,
+                        sample,
+                        currentSettings.sttModelName
+                    ).trim()
+                    if (transcript.isEmpty()) {
+                        _wakeWordStatus.value = EndpointStatus(false, "STT returned an empty transcript")
+                    } else {
+                        val matched = matchesWakeWord(
+                            transcript,
+                            currentSettings.wakeWordName,
+                            currentSettings.wakeWordSensitivity
+                        )
+                        _wakeWordStatus.value = EndpointStatus(
+                            true,
+                            if (matched) "Pipeline works - '${currentSettings.wakeWordName}' would trigger"
+                            else "Pipeline works - '${currentSettings.wakeWordName}' not heard in the sample (expected)"
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                _wakeWordStatus.value = EndpointStatus(false, describeFailure(e))
+            }
+            _wakeWordTesting.value = false
         }
     }
 }

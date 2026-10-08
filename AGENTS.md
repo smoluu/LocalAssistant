@@ -28,7 +28,8 @@ Machine-specific facts (the developer's local endpoints, adb device, build/deplo
 - `data/remote/` - `ApiClient` object with static methods for chatCompletion (SSE streaming), transcribeAudio, synthesizeSpeech, fetchModels, fetchVoices
 - `data/settings/` - `SettingsRepository` using SharedPreferences with custom JSON preset serialization (no kotlinx.serialization for presets)
 - `service/` - `VoiceAssistantService` (foreground service with full pipeline: audio capture → VAD → STT → LLM → TTS), `WakeWordDetectionService` (separate lightweight wake word listener)
-- `ui/chat/` - `ChatViewModel` + `ChatScreen`, `QuickChatViewModel` + `QuickChatScreen` (separate message histories)
+- `ui/chat/` - `ChatViewModel` + `ChatScreen` (single conversation history; the old QuickChat pair was removed when quick chat became the wake-word service)
+- `ui/wake/` - `WakeChatViewModel` + `WakeChatScreen`: always-on hands-free service. Records clips with `recordAudioWithVAD`, transcribes, and when `matchesWakeWord` hits it strips the phrase from the transcript and sends the remainder to the LLM. `MainActivity` starts/stops it from a `LaunchedEffect` on `enableWakeWordDetection`; the card rises from the bottom via `AnimatedVisibility` + `slideInVertically`
 - `ui/settings/` - `SettingsViewModel` with preset management and model fetching, `SettingsScreen`
 - `ui/common/` - `CommonUtilities.kt`: audio recording helpers, WAV conversion, TTS playback, text splitting, chat export
 - `ui/theme/` - `Theme.kt`: Gruvbox dark/light color schemes (Material3)
@@ -79,7 +80,7 @@ adb shell am start -W -n com.localassistant.app/.ui.MainActivity
 ## Things the Agent Should NEVER Do
 - Never hardcode API endpoints - always use values from `AppSettings` loaded via `SettingsRepository`
 - Never make blocking network calls on main thread - all OkHttp calls must be in coroutines with `Dispatchers.IO`
-- Never modify `WakeWordDetectionService` integration without checking for external dependency compatibility (Porcupine/Snowboy)
+- Never add an external wake-word runtime (Porcupine/Snowboy) to `WakeWordDetectionService` or `WakeChatViewModel` without checking licence and on-device footprint - wake matching is currently transcript-based via `CommonUtilities.matchesWakeWord`
 - Never remove foreground service notifications - they are required by Android API 35+ and declared in AndroidManifest.xml
 - Never commit API keys or base URLs that contain credentials to version control
 - Never use `kotlinx.serialization` for preset JSON - the project uses manual string building/parsing (see SettingsRepository preset methods)

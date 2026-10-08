@@ -160,6 +160,8 @@ fun SettingsScreen(onNavigateBack: () -> Unit, viewModel: SettingsViewModel = vi
     val sttTesting by viewModel.sttTesting.collectAsState()
     val ttsBusy by viewModel.ttsModelLoading.collectAsState()
     val ttsTesting by viewModel.ttsTesting.collectAsState()
+    val wakeWordStatus by viewModel.wakeWordStatus.collectAsState()
+    val wakeWordTesting by viewModel.wakeWordTesting.collectAsState()
 
     var showClearDataDialog by remember { mutableStateOf(false) }
     var showFactoryResetDialog by remember { mutableStateOf(false) }
@@ -239,6 +241,38 @@ fun SettingsScreen(onNavigateBack: () -> Unit, viewModel: SettingsViewModel = vi
 
             SettingsSection("Appearance", "🎨", "How the interface looks") {
                 SettingSwitch("Dark Mode (gray Gruvbox)", settings.darkModeEnabled, { viewModel.updateSetting("darkModeEnabled", it) })
+            }
+
+            SettingsSection("Wake Word", "🔑", "Say the phrase to start a conversation without tapping") {
+                EndpointStatusLine(wakeWordStatus, wakeWordTesting)
+                SettingTextField("Wake Phrase", settings.wakeWordName, { viewModel.updateSetting("wakeWordName", it) }, "hey assistant")
+                SettingTextField("Model", settings.wakeWordModel, { viewModel.updateSetting("wakeWordModel", it) }, "built-in")
+                Text(
+                    text = "\"built-in\" matches the phrase with the speech endpoint and needs no extra model. Any other name is a nanowakeword model (.onnx) served by your local endpoint - train one at https://github.com/arcosoph/nanowakeword and type its name here.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Sensitivity:", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.align(Alignment.CenterVertically))
+                    Button(
+                        onClick = { viewModel.updateSetting("wakeWordSensitivity", 0.3f) },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (settings.wakeWordSensitivity < 0.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+                        )
+                    ) { Text("Lenient") }
+                    Button(
+                        onClick = { viewModel.updateSetting("wakeWordSensitivity", 0.7f) },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (settings.wakeWordSensitivity > 0.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+                        )
+                    ) { Text("Strict") }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                SettingSwitch("Wake Word Detection", settings.enableWakeWordDetection, { viewModel.updateSetting("enableWakeWordDetection", it) })
+                TestButton("Test Wake Word", true, wakeWordTesting) { viewModel.runWakeWordTest() }
             }
             
             SettingsSection("Data Management", "💾", "Export, import, and manage your settings data") {

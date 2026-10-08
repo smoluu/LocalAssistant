@@ -34,6 +34,7 @@ data class AppSettings(
     val wakeWordName: String = "hey assistant",
     val wakeWordSensitivity: Float = 0.5f,
     val enableWakeWordDetection: Boolean = true,
+    val wakeWordModel: String = "built-in",
     
     // Voice Activity Detection
     val vadSensitivity: Float = 0.4f,

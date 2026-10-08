@@ -549,6 +549,31 @@ fun buildSilentWav(durationMs: Int = 500, sampleRate: Int = 16000): ByteArray =
     convertPcmToWav(ByteArray(sampleRate * 2 * durationMs / 1000), sampleRate)
 
 /**
+ * Decides whether a transcript is the configured wake word.
+ *
+ * Matching is token based with prefix tolerance, so a slightly misheard phrase
+ * ("hey assistent") still triggers. @param sensitivity is the fraction of the
+ * wake word tokens that must be heard, between 0 and 1.
+ */
+fun matchesWakeWord(transcript: String, wakeWord: String, sensitivity: Float): Boolean {
+    val target = wakeWord.trim().lowercase().split(" ").filter { it.isNotBlank() }
+    if (target.isEmpty()) return false
+
+    val heard = transcript.trim().lowercase().split(" ").filter { it.isNotBlank() }
+    if (heard.isEmpty()) return false
+
+    val threshold = sensitivity.coerceIn(0f, 1f)
+    val hits = target.count { word ->
+        heard.any { heardWord ->
+            heardWord == word ||
+                (word.length > 3 && heardWord.length > 3 &&
+                    (heardWord.startsWith(word) || word.startsWith(heardWord)))
+        }
+    }
+    return hits.toFloat() / target.size >= threshold
+}
+
+/**
  * Play audio bytes, detecting the container format. WAV files are parsed to raw
  * PCM and played via AudioTrack; other containers (MP3, OGG, FLAC) are decoded
  * via MediaCodec and played via AudioTrack.
