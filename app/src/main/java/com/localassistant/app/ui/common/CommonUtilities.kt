@@ -210,7 +210,7 @@ fun recordAudioWithVAD(
         try { audioRecord.release() } catch (_: Exception) {}
     }
 
-    android.util.Log.d("VAD", "Recording completed, ${audioBuffers.size} samples (${audioBuffers.size / 32000}s)")
+    android.util.Log.d("VAD", "Recording completed, ${audioBuffers.size} samples (${audioBuffers.size / sampleRate.toFloat()}s)")
 
     if (audioBuffers.isEmpty()) return null
 
