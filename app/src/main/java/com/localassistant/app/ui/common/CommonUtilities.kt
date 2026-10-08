@@ -148,7 +148,9 @@ fun recordAudioWithVAD(
         audioRecord.startRecording()
 
         var chunkCount = 0
-        val maxIterations = sampleRate * 60 * 2 // Max 60 seconds
+        // Each iteration consumes buffer.size samples, so the 60 s cap has to be
+        // counted in iterations - counting samples would allow hours of silence.
+        val maxIterations = sampleRate * 60 / buffer.size
 
         while (chunkCount < maxIterations && !stopSignal.get()) {
             val bytesRead = audioRecord.read(buffer, 0, buffer.size)
@@ -215,11 +217,12 @@ fun recordAudioWithVAD(
     if (audioBuffers.isEmpty()) return null
 
     // Convert to WAV format (little-endian PCM)
-    val pcmBytes = audioBuffers.flatMap { sample ->
-        val lowByte = (sample.toInt() and 0xFF).toByte()
-        val highByte = ((sample.toInt()) shr 8).toByte()
-        listOf(lowByte, highByte)
-    }.toByteArray()
+    val pcmBytes = ByteArray(audioBuffers.size * 2)
+    for (i in audioBuffers.indices) {
+        val sample = audioBuffers[i].toInt()
+        pcmBytes[i * 2] = (sample and 0xFF).toByte()
+        pcmBytes[i * 2 + 1] = ((sample shr 8) and 0xFF).toByte()
+    }
 
     return convertPcmToWav(pcmBytes, sampleRate)
 }
@@ -273,12 +276,22 @@ fun parseWavBytes(data: ByteArray): Pair<Int, ByteArray>? {
         ((data[i + 2].toInt() and 0xFF) shl 16) or
         ((data[i + 3].toInt() and 0xFF) shl 24)
 
-    val sampleRate = le32(24)
+    // The canonical layout puts the rate at a fixed offset, but a leading LIST chunk
+    // moves it - the walk below overwrites this when it sees the real fmt chunk.
+    var sampleRate = le32(24)
 
     // Walk chunk list to find the "data" chunk (there may be extra chunks)
     var offset = 12
     while (offset + 8 <= data.size) {
-        if ((data[offset].toInt() and 0xFF) == 'd'.code &&
+        val chunkSize = le32(offset + 4)
+        if ((data[offset].toInt() and 0xFF) == 'f'.code &&
+            (data[offset + 1].toInt() and 0xFF) == 'm'.code &&
+            (data[offset + 2].toInt() and 0xFF) == 't'.code &&
+            (data[offset + 3].toInt() and 0xFF) == ' '.code
+        ) {
+            // fmt payload is format(2), channels(2), then sample rate(4)
+            sampleRate = le32(offset + 8 + 4)
+        } else if ((data[offset].toInt() and 0xFF) == 'd'.code &&
             (data[offset + 1].toInt() and 0xFF) == 'a'.code &&
             (data[offset + 2].toInt() and 0xFF) == 't'.code &&
             (data[offset + 3].toInt() and 0xFF) == 'a'.code
@@ -289,7 +302,6 @@ fun parseWavBytes(data: ByteArray): Pair<Int, ByteArray>? {
             }
             return null
         }
-        val chunkSize = le32(offset + 4)
         // Skip the whole chunk, padded to an even byte count - stepping by only the
         // 8-byte header lands inside the chunk data and misreads it as a chunk name.
         offset += 8 + chunkSize + (chunkSize and 1)
@@ -613,9 +625,12 @@ suspend fun playAudioBytes(data: ByteArray): Boolean {
         (data[3].toInt() and 0xFF) == 'F'.code
     ) {
         val parsed = parseWavBytes(data)
-        val sampleRate = parsed?.first ?: 22050
-        val pcm = parsed?.second ?: data
-        return playPcmAudio(pcm, sampleRate)
+        if (parsed == null) {
+            // MediaCodec understands the RIFF container too, so decode it instead of
+            // playing the header bytes as PCM at a guessed rate.
+            return playMp3Audio(data)
+        }
+        return playPcmAudio(parsed.second, parsed.first)
     }
 
     // MP3 / OGG / FLAC / other - decode via MediaCodec and play via AudioTrack.
@@ -900,7 +915,7 @@ fun exportChatToJsonFile(context: Context, messages: List<com.localassistant.app
                 append("      \"id\": ${message.id},\n")
                 append("      \"role\": \"$role\",\n")
                 append("      \"content\": \"$escapedContent\",\n")
-                append("      \"timestamp\": $timeStr\n")
+                append("      \"timestamp\": \"$timeStr\"\n")
                 append("    }${if (index < messages.size - 1) "," else ""}\n")
             }
 

@@ -16,16 +16,35 @@ import org.junit.Test
  */
 class CommonUtilitiesTest {
 
-    private fun wavBytes(sampleRate: Int, extraChunkName: String, extraChunkBytes: ByteArray, pcm: ByteArray): ByteArray {
+    // Chunks may appear before "fmt " (tagged files) or between "fmt " and "data"
+    // (server padding); both shift where the interesting bytes live.
+    private fun wavBytes(
+        sampleRate: Int,
+        pcm: ByteArray,
+        leadingChunkName: String = "",
+        leadingChunkBytes: ByteArray = ByteArray(0),
+        extraChunkName: String = "",
+        extraChunkBytes: ByteArray = ByteArray(0)
+    ): ByteArray {
         val out = mutableListOf<Int>()
         fun put(text: String) = text.toByteArray().forEach { out.add(it.toInt() and 0xFF) }
         fun le32(value: Int) = (0..3).forEach { out.add((value shr (8 * it)) and 0xFF) }
         fun le16(value: Int) = (0..1).forEach { out.add((value shr (8 * it)) and 0xFF) }
+        fun chunk(name: String, body: ByteArray) {
+            if (name.isEmpty()) return
+            put(name)
+            le32(body.size)
+            body.forEach { out.add(it.toInt() and 0xFF) }
+            if (body.size and 1 == 1) out.add(0)
+        }
 
-        val paddedExtraSize = extraChunkBytes.size + (extraChunkBytes.size and 1)
+        fun padded(name: String, body: ByteArray) =
+            if (name.isEmpty()) 0 else 8 + body.size + (body.size and 1)
+
         put("RIFF")
-        le32(36 + pcm.size + if (extraChunkName.isEmpty()) 0 else 8 + paddedExtraSize)
+        le32(36 + pcm.size + padded(leadingChunkName, leadingChunkBytes) + padded(extraChunkName, extraChunkBytes))
         put("WAVE")
+        chunk(leadingChunkName, leadingChunkBytes)
         put("fmt ")
         le32(16)
         le16(1)
@@ -34,12 +53,7 @@ class CommonUtilitiesTest {
         le32(sampleRate * 2)
         le16(2)
         le16(16)
-        if (extraChunkName.isNotEmpty()) {
-            put(extraChunkName)
-            le32(extraChunkBytes.size)
-            extraChunkBytes.forEach { out.add(it.toInt() and 0xFF) }
-            if (extraChunkBytes.size and 1 == 1) out.add(0)
-        }
+        chunk(extraChunkName, extraChunkBytes)
         put("data")
         le32(pcm.size)
         pcm.forEach { out.add(it.toInt() and 0xFF) }
@@ -49,9 +63,20 @@ class CommonUtilitiesTest {
     @Test
     fun parseWavBytes_readsDataChunkAfterAnExtraChunk() {
         val pcm = ByteArray(16) { (it * 7).toByte() }
-        val parsed = parseWavBytes(wavBytes(22050, "junk", ByteArray(5), pcm))
-            ?: throw AssertionError("a WAV with an extra chunk was rejected")
+        val parsed = parseWavBytes(
+            wavBytes(22050, pcm, extraChunkName = "junk", extraChunkBytes = ByteArray(5))
+        ) ?: throw AssertionError("a WAV with an extra chunk was rejected")
         assert(parsed.first == 22050) { "the sample rate was read from the wrong offset" }
+        assert(parsed.second.toList() == pcm.toList()) { "the PCM block did not round-trip" }
+    }
+
+    @Test
+    fun parseWavBytes_readsTheRateFromTheFmtChunk() {
+        val pcm = ByteArray(8) { (it * 3).toByte() }
+        val parsed = parseWavBytes(
+            wavBytes(44100, pcm, leadingChunkName = "LIST", leadingChunkBytes = ByteArray(7))
+        ) ?: throw AssertionError("a WAV with a chunk before fmt was rejected")
+        assert(parsed.first == 44100) { "a leading chunk shifts the rate away from the fixed offset" }
         assert(parsed.second.toList() == pcm.toList()) { "the PCM block did not round-trip" }
     }
 
