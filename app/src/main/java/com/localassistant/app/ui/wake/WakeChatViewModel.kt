@@ -183,14 +183,21 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
         }
     }
 
+    private companion object Constants {
+        // How many of the newest wake-chat turns are sent to the LLM as context.
+        const val MAX_LLM_CONTEXT = 20
+    }
+
     /**
-     * Ask the LLM endpoint for a reply to [request], using the wake-chat history as context.
+     * Ask the LLM endpoint for a reply to [request], using the recent wake-chat history as context.
      */
     private suspend fun complete(
         currentSettings: com.localassistant.app.domain.model.AppSettings,
         request: String
     ): String {
-        val history = _messages.value.map { msg ->
+        // The service runs hands-free all day, so only the latest turns are sent -
+        // an unbounded history would eventually overflow the model's context.
+        val history = _messages.value.takeLast(MAX_LLM_CONTEXT).map { msg ->
             mapOf("role" to msg.role.name.lowercase(), "content" to msg.content)
         }
         return try {
