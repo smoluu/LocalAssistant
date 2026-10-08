@@ -55,6 +55,10 @@ object ApiClient {
     
     /**
      * Send a chat completion request to the LLM endpoint.
+     *
+     * When [stream] is true the SSE stream is always consumed, so the returned
+     * content is the reassembled answer and never the raw event stream; [onChunk]
+     * is optional and only decides whether deltas are forwarded while reading.
      */
     suspend fun chatCompletion(
         baseUrl: String,
@@ -65,10 +69,11 @@ object ApiClient {
         maxTokens: Int = 4096,
         stream: Boolean = true,
         systemPrompt: String = "",
+        timeoutSeconds: Long = DEFAULT_TIMEOUT,
         onChunk: ((String) -> Unit)? = null
     ): ChatResponse {
         android.util.Log.d("ApiClient", "chatCompletion called, stream=$stream")
-        val client = createClient(baseUrl, apiKey)
+        val client = createClient(baseUrl, apiKey, timeoutSeconds)
         
         var cleanUrl = baseUrl.trimEnd('/')
         if (cleanUrl.endsWith("/chat/completions")) {
@@ -105,11 +110,9 @@ object ApiClient {
                     
                     val body = response.body ?: throw IOException("Empty response")
                     
-                    if (stream && onChunk != null) {
+                    if (stream) {
                         android.util.Log.d("ApiClient", "Using streaming response handler")
-                        val fullText = handleStreamingResponse(body, onChunk)
-                        android.util.Log.d("ApiClient", "Streaming completed, got ${fullText.length} chars: $fullText")
-                        parseReasoningAndContent(fullText)
+                        handleStreamingResponse(body, onChunk)
                     } else {
                         android.util.Log.d("ApiClient", "Using non-streaming response")
                         val content = body.string()
@@ -215,9 +218,8 @@ object ApiClient {
         }
         
         // Use multipart/form-data for STT endpoint (required by Ollama/Whisper)
-        val mediaPart = RequestBody.create("audio/wav".toMediaType(), audioData)
-        val modelPart = RequestBody.create("text/plain".toMediaType(), model)
-        
+        val mediaPart = audioData.toRequestBody("audio/wav".toMediaType())
+
         val requestBody = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("file", "audio.wav", mediaPart)
@@ -485,13 +487,19 @@ object ApiClient {
                    .replace("\t", "\\t")}\""
     }
     
+    /**
+     * Read an SSE chat-completion stream, keeping reasoning deltas (`\u0001`-prefixed,
+     * as produced by [extractContentFromJson]) apart from the answer so callers that
+     * do not pass an [onChunk] still receive clean content.
+     */
     private suspend fun handleStreamingResponse(
         body: ResponseBody,
         onChunk: ((String) -> Unit)?
-    ): String {
-        var fullResponse = ""
+    ): ChatResponse {
+        val contentBuilder = StringBuilder()
+        val reasoningBuilder = StringBuilder()
         android.util.Log.d("ApiClient", "Starting SSE stream read")
-        
+
         try {
             // Use buffered reader for proper streaming
             val reader = java.io.BufferedReader(java.io.InputStreamReader(body.byteStream()))
@@ -505,16 +513,20 @@ object ApiClient {
                 lineCount++
                 if (line.startsWith("data: ")) {
                     val jsonStr = line.substring(6).trim()
-                    
+
                     if (jsonStr == "[DONE]") {
                         android.util.Log.d("ApiClient", "Received [DONE] marker")
                         break
                     }
-                    
+
                     // Extract content from SSE chunk
                     val chunk = extractContentFromJson(jsonStr)
                     if (chunk.isNotEmpty()) {
-                        fullResponse += chunk
+                        if (chunk.startsWith("\u0001")) {
+                            reasoningBuilder.append(chunk.substring(1))
+                        } else {
+                            contentBuilder.append(chunk)
+                        }
                         android.util.Log.d("ApiClient", "Extracted chunk: '$chunk'")
                         try {
                             onChunk?.invoke(chunk)
@@ -531,10 +543,18 @@ object ApiClient {
             android.util.Log.e("ApiClient", "Error reading SSE stream")
             // Handle streaming errors gracefully
         }
-        
-        return fullResponse
+
+        // Answers that embed <think> tags inside the content deltas are split here as well,
+        // so a single non-streaming server and a streaming one report the same way.
+        val parsed = parseReasoningAndContent(contentBuilder.toString())
+        val streamedReasoning = reasoningBuilder.toString().trim()
+        val reasoning = if (streamedReasoning.isNotEmpty()) streamedReasoning else parsed.reasoningContent.orEmpty().trim()
+        android.util.Log.d("ApiClient", "Streaming completed, got ${parsed.content.length} chars")
+        return ChatResponse(
+            content = parsed.content,
+            reasoningContent = reasoning.takeIf { it.isNotEmpty() }
+        )
     }
-    
     private fun extractContentFromJson(json: String): String {
         try {
             val root = org.json.JSONObject(json)
