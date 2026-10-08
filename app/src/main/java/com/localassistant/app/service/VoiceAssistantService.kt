@@ -18,6 +18,7 @@ import androidx.annotation.RequiresPermission
 import androidx.core.app.NotificationCompat
 import com.localassistant.app.LocalAssistantApplication
 import com.localassistant.app.data.remote.ApiClient
+import com.localassistant.app.ui.common.isNonSpeechTranscript
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -543,19 +544,6 @@ class VoiceAssistantService : Service() {
             } catch (e: Exception) {
                 handleError("Voice processing error: ${e.message}")
             }
-        }
-    }
-
-    /**
-     * whisper.cpp answers non-speech with bracketed tokens ("[MUSIC]", "[BLANK_AUDIO]")
-     * instead of an empty transcript, and the always-on service would otherwise send
-     * those to the LLM as if they were a request.
-     */
-    private fun isNonSpeechTranscript(text: String): Boolean {
-        val tokens = text.trim().split(" ").filter { it.isNotEmpty() }
-        if (tokens.isEmpty()) return true
-        return tokens.all {
-            (it.startsWith("[") && it.endsWith("]")) || (it.startsWith("(") && it.endsWith(")"))
         }
     }
 

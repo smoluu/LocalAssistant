@@ -7,6 +7,7 @@ import com.localassistant.app.data.remote.ApiClient
 import com.localassistant.app.data.settings.SettingsRepository
 import com.localassistant.app.domain.model.ChatMessage
 import com.localassistant.app.domain.model.MessageRole
+import com.localassistant.app.ui.common.isNonSpeechTranscript
 import com.localassistant.app.ui.common.matchesWakeWord
 import com.localassistant.app.ui.common.playTTSAudio
 import com.localassistant.app.ui.common.recordAudioWithVAD
@@ -114,7 +115,10 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
                 request = if (requestClip == null || requestClip.isEmpty()) {
                     ""
                 } else {
-                    transcribe(currentSettings, requestClip) ?: ""
+                    // A request clip that only holds whisper.cpp's bracketed markers is
+                    // not speech, so it must not reach the LLM either.
+                    val requestText = transcribe(currentSettings, requestClip) ?: ""
+                    if (isNonSpeechTranscript(requestText)) "" else requestText
                 }
             }
 

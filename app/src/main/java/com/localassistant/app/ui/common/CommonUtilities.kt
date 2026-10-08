@@ -578,6 +578,21 @@ fun matchesWakeWord(transcript: String, wakeWord: String, sensitivity: Float): B
 }
 
 /**
+ * Decides whether a transcript carries speech at all.
+ *
+ * whisper.cpp answers silence or music with bracketed tokens ("[BLANK_AUDIO]",
+ * "[MUSIC]") instead of an empty string, so both listening paths need to treat
+ * such a transcript as "nothing was said" before it reaches the LLM.
+ */
+fun isNonSpeechTranscript(text: String): Boolean {
+    val tokens = text.trim().split(" ").filter { it.isNotBlank() }
+    if (tokens.isEmpty()) return true
+    return tokens.all {
+        (it.startsWith("[") && it.endsWith("]")) || (it.startsWith("(") && it.endsWith(")"))
+    }
+}
+
+/**
  * Play audio bytes, detecting the container format. WAV files are parsed to raw
  * PCM and played via AudioTrack; other containers (MP3, OGG, FLAC) are decoded
  * via MediaCodec and played via AudioTrack.
