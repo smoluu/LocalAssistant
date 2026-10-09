@@ -101,7 +101,7 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
             }
 
             val cost = bestMatchCost(extractWakeFeatures(clip), references)
-            if (cost > wakeCostThreshold(currentSettings.wakeWordSensitivity)) {
+            if (cost > wakeCostThreshold(currentSettings.wakeWordSensitivity, references)) {
                 _phase.value = "detecting"
                 continue
             }

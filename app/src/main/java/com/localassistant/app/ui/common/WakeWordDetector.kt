@@ -19,6 +19,10 @@ private const val FFT_SIZE = 1024
 private const val MIN_FRAMES = 5
 private const val MAX_REFERENCE_FRAMES = 500
 private const val MAX_REFERENCES = 8
+// Floor so identical enrollments (spread 0) still leave a little tolerance.
+private const val MIN_MATCH_THRESHOLD = 0.5f
+// Fallback spread when fewer than two references are enrolled, in normalised units.
+private const val SINGLE_REFERENCE_SPREAD = 1.5f
 private const val REFERENCE_FILE = "wake_references.txt"
 
 /**
@@ -122,7 +126,37 @@ fun mfcc(samples: FloatArray): FloatArray {
             features[t * MFCC_FEATURES + MFCC_CEPSTRAL + k] = smoothDelta[t * MFCC_CEPSTRAL + k]
         }
     }
+    normalizePerFeature(features)
     return features
+}
+
+/**
+ * Scales every feature dimension to zero mean and unit variance, in place.
+ *
+ * Raw cepstral coefficients are sums of log magnitudes, so their absolute size
+ * follows the recording's volume and length; comparing them across recordings
+ * without this step puts the DTW cost on a scale that no fixed threshold can
+ * sit on. After normalising, a cost of 1 means "one standard deviation apart".
+ */
+private fun normalizePerFeature(features: FloatArray) {
+    val frameCount = features.size / MFCC_FEATURES
+    if (frameCount < 2) return
+    for (k in 0..<MFCC_FEATURES) {
+        var sum = 0.0
+        for (t in 0..<frameCount) sum += features[t * MFCC_FEATURES + k]
+        val mean = sum / frameCount
+        var variance = 0.0
+        for (t in 0..<frameCount) {
+            val d = features[t * MFCC_FEATURES + k] - mean
+            variance += d * d
+        }
+        // A near-constant dimension (silence) has no scale to divide by, so leave it at the mean.
+        val std = kotlin.math.sqrt(variance / frameCount)
+        if (std < 1.0e-4f) continue
+        for (t in 0..<frameCount) {
+            features[t * MFCC_FEATURES + k] = ((features[t * MFCC_FEATURES + k] - mean) / std).toFloat()
+        }
+    }
 }
 
 /**
@@ -251,12 +285,41 @@ private fun euclidean(a: FloatArray, aOffset: Int, b: FloatArray, bOffset: Int):
 }
 
 /**
- * Maps the user-facing 0..1 sensitivity to a DTW cost threshold: a stricter
- * setting lowers the threshold, a looser one raises it.
+ * The cost a clip may have against the enrolled references and still count as
+ * the wake word.
+ *
+ * The threshold is derived from the references themselves: their median pairwise
+ * cost is how much the user's own takes of the same phrase already differ from
+ * each other, so accepting up to a multiple of that spread needs no absolute
+ * constant that would depend on volume, phrase length or microphone.
+ * Sensitivity scales that multiple: strict stays near the observed spread,
+ * lenient accepts several times it.
  */
-fun wakeCostThreshold(sensitivity: Float): Float {
+fun wakeCostThreshold(sensitivity: Float, references: List<FloatArray>): Float {
     val clamped = kotlin.math.max(0.0f, kotlin.math.min(1.0f, sensitivity))
-    return (10.0f - 9.0f * clamped).coerceAtLeast(0.5f)
+    val factor = 1.2f + 2.6f * (1.0f - clamped)
+    return (referenceSpread(references) * factor).coerceAtLeast(MIN_MATCH_THRESHOLD)
+}
+
+/**
+ * Median pairwise DTW cost among the enrolled references - the spread the user's
+ * own takes of the phrase already show. Below two references there is nothing to
+ * measure, so a single reference falls back to a fixed cost in normalised units.
+ */
+private fun referenceSpread(references: List<FloatArray>): Float {
+    val usable = references.filter { it.isNotEmpty() }
+    if (usable.size < 2) return SINGLE_REFERENCE_SPREAD
+
+    val costs = mutableListOf<Float>()
+    for (i in usable.indices) {
+        for (j in (i + 1)..<usable.size) {
+            val cost = dtwCost(usable[i], usable[j])
+            if (cost.isFinite()) costs.add(cost)
+        }
+    }
+    if (costs.isEmpty()) return SINGLE_REFERENCE_SPREAD
+    costs.sort()
+    return costs[costs.size / 2]
 }
 
 /**
@@ -274,7 +337,14 @@ fun loadWakeReferences(context: Context): List<FloatArray> {
             val parts = line.split(' ')
             if (parts.size < 2) continue
             val values = parts.drop(1).mapNotNull { it.toFloatOrNull() }
-            if (values.isNotEmpty()) references += values.toFloatArray()
+            if (values.isNotEmpty()) {
+                val reference = values.toFloatArray()
+                // Enrollment files written before the features were normalised hold
+                // raw log-magnitude coefficients. Normalising again is a no-op for
+                // current entries, so old enrollments stay usable without re-recording.
+                normalizePerFeature(reference)
+                references += reference
+            }
         }
         references
     } catch (_: Exception) {

@@ -580,7 +580,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                     _wakeWordStatus.value = EndpointStatus(false, "No audio captured - check the microphone")
                 } else {
                     val cost = bestMatchCost(extractWakeFeatures(clip), references)
-                    val threshold = wakeCostThreshold(currentSettings.wakeWordSensitivity)
+                    val threshold = wakeCostThreshold(currentSettings.wakeWordSensitivity, references)
                     _wakeWordStatus.value = EndpointStatus(
                         cost <= threshold,
                         if (cost <= threshold)

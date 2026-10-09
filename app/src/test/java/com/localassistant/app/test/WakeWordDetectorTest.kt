@@ -105,10 +105,46 @@ class WakeWordDetectorTest {
     }
 
     @Test
-    fun wakeCostThreshold_clampsSensitivity() {
-        assert(wakeCostThreshold(0.0f) == 10.0f) { "the loosest setting must accept the widest cost" }
-        assert(wakeCostThreshold(1.0f) == 1.0f) { "the strictest setting must accept only near matches" }
-        assert(wakeCostThreshold(-1.0f) == 10.0f) { "sensitivity below zero was not clamped" }
-        assert(wakeCostThreshold(2.0f) == 1.0f) { "sensitivity above one was not clamped" }
+    fun bestMatchCost_isIndependentOfVolume() {
+        // The same signal at three different volumes. Raw cepstral coefficients
+        // are sums of log magnitudes, so they grow with volume; after per-feature
+        // normalisation they must not, which is what lets one threshold serve
+        // every microphone and every loudness.
+        val loud = mfcc(pcmToFloats(sinePcm(4000, 8000, 250)))
+        val middle = mfcc(pcmToFloats(sinePcm(4000, 4000, 250)))
+        val quiet = mfcc(pcmToFloats(sinePcm(4000, 400, 250)))
+        val againstLoud = bestMatchCost(quiet, listOf(loud))
+        val againstMiddle = bestMatchCost(quiet, listOf(middle))
+        assert(kotlin.math.abs(againstLoud - againstMiddle) < 0.05f) {
+            "the same phrase at different volumes cost $againstLoud and $againstMiddle"
+        }
+    }
+
+    @Test
+    fun wakeCostThreshold_scalesWithSensitivity() {
+        val references = listOf(
+            mfcc(pcmToFloats(sinePcm(4000, 7000, 250))),
+            mfcc(pcmToFloats(sinePcm(4000, 3000, 97)))
+        )
+        val lenient = wakeCostThreshold(0.0f, references)
+        val strict = wakeCostThreshold(1.0f, references)
+        assert(lenient > strict) { "the loosest setting must accept a wider cost than the strictest" }
+        assert(strict >= 0.5f) { "the strictest setting fell below the minimum tolerance" }
+        assert(wakeCostThreshold(-1.0f, references) == lenient) { "sensitivity below zero was not clamped" }
+        assert(wakeCostThreshold(2.0f, references) == strict) { "sensitivity above one was not clamped" }
+    }
+
+    @Test
+    fun wakeCostThreshold_fallsBackWhenSpreadIsUnmeasurable() {
+        // With fewer than two references there is no spread to measure, so the
+        // fixed fallback applies - and it must stay in normalised units, nowhere
+        // near the tens-of-raw-magnitude scale the first implementation used.
+        val single = listOf(mfcc(pcmToFloats(sinePcm(4000, 7000, 250))))
+        val lenient = wakeCostThreshold(0.0f, single)
+        assert(lenient > wakeCostThreshold(1.0f, single)) { "a single reference left no tolerance at all" }
+        assert(lenient < 10.0f) { "the fallback spread was not in normalised units" }
+        assert(wakeCostThreshold(1.0f, emptyList()) >= 0.5f) {
+            "no references produced a threshold below the minimum tolerance"
+        }
     }
 }
