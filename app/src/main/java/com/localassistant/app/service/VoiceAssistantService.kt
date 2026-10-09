@@ -58,6 +58,9 @@ class VoiceAssistantService : Service() {
 
         // Sample rate used while the battery is low
         private const val ENERGY_SAVING_SAMPLE_RATE = 8000
+
+        // Longest utterance kept before it is sent to STT
+        private const val MAX_UTTERANCE_SECONDS = 60
         
         /**
          * Build an intent for this service with the given action.
@@ -425,6 +428,9 @@ class VoiceAssistantService : Service() {
         val buffer = ShortArray(4096)
         // Accumulate the full utterance so the complete recording can be sent to STT
         val speechBuffer = ArrayDeque<Short>()
+        // Same 60s bound CommonUtilities.recordAudioWithVAD uses - without it a
+        // continuous noise source grows the deque until the process runs out of memory.
+        val maxUtteranceSamples = sampleRate * MAX_UTTERANCE_SECONDS
         var inSpeech = false
         var silenceStart = 0L
         
@@ -468,12 +474,14 @@ class VoiceAssistantService : Service() {
                         for (i in 0 until readCount) {
                             speechBuffer.add(buffer[i])
                         }
+                        while (speechBuffer.size > maxUtteranceSamples) speechBuffer.removeFirst()
                         silenceStart = 0L
                     } else if (inSpeech) {
                         // Keep trailing silence in the buffer for natural transcription
                         for (i in 0 until readCount) {
                             speechBuffer.add(buffer[i])
                         }
+                        while (speechBuffer.size > maxUtteranceSamples) speechBuffer.removeFirst()
                         if (silenceStart == 0L) {
                             silenceStart = System.currentTimeMillis()
                         } else if (System.currentTimeMillis() - silenceStart > vadMinSilenceDurationMs) {
@@ -759,7 +767,14 @@ class VoiceAssistantService : Service() {
      * sample rate and stripped before playback.
      */
     private suspend fun playAudio(audioBytes: ByteArray) {
-        com.localassistant.app.ui.common.playAudioBytes(audioBytes)
+        // stopListening() waits while this flag is set so an in-flight response
+        // finishes before the foreground service tears down.
+        isTtsPlaying = true
+        try {
+            com.localassistant.app.ui.common.playAudioBytes(audioBytes)
+        } finally {
+            isTtsPlaying = false
+        }
     }
 
     /**
