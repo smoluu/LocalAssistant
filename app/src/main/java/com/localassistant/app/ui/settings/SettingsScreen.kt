@@ -162,6 +162,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, viewModel: SettingsViewModel = vi
     val ttsTesting by viewModel.ttsTesting.collectAsState()
     val wakeWordStatus by viewModel.wakeWordStatus.collectAsState()
     val wakeWordTesting by viewModel.wakeWordTesting.collectAsState()
+    val wakeReferenceCount by viewModel.wakeReferenceCount.collectAsState()
     val savedPresets by viewModel.presets.collectAsState()
 
     var showClearDataDialog by remember { mutableStateOf(false) }
@@ -247,12 +248,30 @@ fun SettingsScreen(onNavigateBack: () -> Unit, viewModel: SettingsViewModel = vi
             SettingsSection("Wake Word", "🔑", "Say the phrase to start a conversation without tapping") {
                 EndpointStatusLine(wakeWordStatus, wakeWordTesting)
                 SettingTextField("Wake Phrase", settings.wakeWordName, { viewModel.updateSetting("wakeWordName", it) }, "hey assistant")
-                SettingTextField("Model", settings.wakeWordModel, { viewModel.updateSetting("wakeWordModel", it) }, "built-in")
                 Text(
-                    text = "\"built-in\" matches the phrase with the speech endpoint and needs no extra model. Any other name is a nanowakeword model (.onnx) served by your local endpoint - train one at https://github.com/arcosoph/nanowakeword and type its name here.",
+                    text = "The phrase is recognised on-device from audio you record here: the clip is reduced to mel-frequency cepstral features and matched against your recordings with dynamic time warping. No model download and no endpoint is involved, so record the phrase a few times to make matching reliable.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Recorded references: ${wakeReferenceCount}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (wakeReferenceCount > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { viewModel.recordWakeReference() },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                    ) { Text("Record Reference") }
+                    Button(
+                        onClick = { viewModel.clearWakeWordReferences() },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                    ) { Text("Clear References") }
+                }
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Sensitivity:", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.align(Alignment.CenterVertically))
@@ -275,7 +294,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, viewModel: SettingsViewModel = vi
                 SettingSwitch("Wake Word Detection", settings.enableWakeWordDetection, { viewModel.updateSetting("enableWakeWordDetection", it) })
                 TestButton("Test Wake Word", true, wakeWordTesting) { viewModel.runWakeWordTest() }
             }
-            
+
             SettingsSection("Data Management", "💾", "Export, import, and manage your settings data") {
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = { showClearDataDialog = true }, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Clear Data") }

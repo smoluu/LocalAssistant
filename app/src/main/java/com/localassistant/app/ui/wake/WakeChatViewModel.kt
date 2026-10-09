@@ -7,10 +7,13 @@ import com.localassistant.app.data.remote.ApiClient
 import com.localassistant.app.data.settings.SettingsRepository
 import com.localassistant.app.domain.model.ChatMessage
 import com.localassistant.app.domain.model.MessageRole
+import com.localassistant.app.ui.common.bestMatchCost
+import com.localassistant.app.ui.common.extractWakeFeatures
 import com.localassistant.app.ui.common.isNonSpeechTranscript
-import com.localassistant.app.ui.common.matchesWakeWord
+import com.localassistant.app.ui.common.loadWakeReferences
 import com.localassistant.app.ui.common.playTTSAudio
 import com.localassistant.app.ui.common.recordAudioWithVAD
+import com.localassistant.app.ui.common.wakeCostThreshold
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -21,10 +24,12 @@ import kotlinx.coroutines.withContext
 /**
  * ViewModel for the wake-word chat service.
  *
- * Listens at the microphone while the app is open, transcribes short clips with
- * the STT endpoint, and starts a conversation when the configured wake phrase is
- * heard. The phrase is matched on the transcript, so no extra model runtime is
- * shipped; a nanowakeword model name in settings is accepted for future use.
+ * Listens at the microphone while the app is open and decides "was the wake
+ * phrase spoken?" on-device: the recorded clip is reduced to MFCC features and
+ * matched against the user-enrolled references with dynamic time warping
+ * (see WakeWordDetector), so the trigger never depends on the STT endpoint.
+ * STT is only used afterwards, to turn the request that follows the phrase into
+ * text.
  */
 class WakeChatViewModel(application: android.app.Application) : AndroidViewModel(application) {
 
@@ -87,25 +92,27 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
                 continue
             }
 
-            val heard = transcribe(currentSettings, clip)
-            if (heard == null) {
+            val references = loadWakeReferences(context)
+            if (references.isEmpty()) {
+                _statusMessage.value = "No wake-word references recorded - open Settings and speak the phrase"
                 _phase.value = "error"
-                delay(1500L)
+                delay(2000L)
                 continue
             }
 
-            if (!matchesWakeWord(
-                heard,
-                currentSettings.wakeWordName,
-                currentSettings.wakeWordSensitivity
-            )) {
+            val cost = bestMatchCost(extractWakeFeatures(clip), references)
+            if (cost > wakeCostThreshold(currentSettings.wakeWordSensitivity)) {
                 _phase.value = "detecting"
                 continue
             }
 
-            // Whatever follows the wake phrase is the request; when the user said
-            // the phrase alone, take the next utterance instead.
-            var request = stripWakePhrase(heard, currentSettings.wakeWordName)
+            // The trigger has already fired on-device, so STT is only reached once the
+            // phrase is heard and only turns the request into text: the phrase may be
+            // followed by it in the same breath, and when the user said the phrase
+            // alone the next utterance is the request.
+            _phase.value = "listening"
+            val heard = transcribe(currentSettings, clip) ?: ""
+            var request = if (isNonSpeechTranscript(heard)) "" else stripWakePhrase(heard, currentSettings.wakeWordName)
             if (request.isBlank()) {
                 _phase.value = "listening"
                 val requestClip = withContext(Dispatchers.IO) {

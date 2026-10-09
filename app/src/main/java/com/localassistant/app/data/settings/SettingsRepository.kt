@@ -36,7 +36,6 @@ class SettingsRepository(private val context: Context) {
 |Keep responses concise and conversational since they are spoken aloud."""
         const val DEFAULT_WAKE_WORD_NAME = "hey assistant"
         const val DEFAULT_WAKE_WORD_SENSITIVITY = 0.5f
-        const val DEFAULT_WAKE_WORD_MODEL = "built-in"
         const val DEFAULT_VAD_SENSITIVITY = 0.4f
         const val DEFAULT_VAD_MIN_SILENCE_MS = 800
 
@@ -74,7 +73,6 @@ class SettingsRepository(private val context: Context) {
             
             wakeWordName = sharedPreferences.getString("wake_word_name", DEFAULT_WAKE_WORD_NAME) ?: DEFAULT_WAKE_WORD_NAME,
             wakeWordSensitivity = sharedPreferences.getFloat("wake_word_sensitivity", DEFAULT_WAKE_WORD_SENSITIVITY),
-            wakeWordModel = sharedPreferences.getString("wake_word_model", DEFAULT_WAKE_WORD_MODEL) ?: DEFAULT_WAKE_WORD_MODEL,
             enableWakeWordDetection = sharedPreferences.getBoolean("enable_wake_word", true),
             
             vadSensitivity = sharedPreferences.getFloat("vad_sensitivity", DEFAULT_VAD_SENSITIVITY),
@@ -123,7 +121,6 @@ class SettingsRepository(private val context: Context) {
             
             putString("wake_word_name", settings.wakeWordName)
             putFloat("wake_word_sensitivity", settings.wakeWordSensitivity)
-            putString("wake_word_model", settings.wakeWordModel)
             putBoolean("enable_wake_word", settings.enableWakeWordDetection)
             
             putFloat("vad_sensitivity", settings.vadSensitivity)
@@ -243,7 +240,6 @@ class SettingsRepository(private val context: Context) {
         appendStr(sb, "systemPrompt", settings.systemPrompt)
         appendStr(sb, "wakeWordName", settings.wakeWordName)
         appendBool(sb, "enableWakeWordDetection", settings.enableWakeWordDetection)
-        appendStr(sb, "wakeWordModel", settings.wakeWordModel)
         appendNum(sb, "wakeWordSensitivity", settings.wakeWordSensitivity)
         appendNum(sb, "vadSensitivity", settings.vadSensitivity)
         appendNum(sb, "vadMinSilenceDurationMs", settings.vadMinSilenceDurationMs)
@@ -332,7 +328,6 @@ class SettingsRepository(private val context: Context) {
                 systemPrompt = extract("systemPrompt", base.systemPrompt),
                 wakeWordName = extract("wakeWordName", base.wakeWordName),
                 enableWakeWordDetection = extractBool("enableWakeWordDetection", base.enableWakeWordDetection),
-                wakeWordModel = extract("wakeWordModel", DEFAULT_WAKE_WORD_MODEL),
                 wakeWordSensitivity = extractNum("wakeWordSensitivity", base.wakeWordSensitivity.toDouble()).toFloat(),
                 vadSensitivity = extractNum("vadSensitivity", base.vadSensitivity.toDouble()).toFloat(),
                 vadMinSilenceDurationMs = extractNum("vadMinSilenceDurationMs", base.vadMinSilenceDurationMs.toDouble()).toInt(),

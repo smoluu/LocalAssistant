@@ -29,9 +29,9 @@ Machine-specific facts (the developer's local endpoints, adb device, build/deplo
 - `data/settings/` - `SettingsRepository` using SharedPreferences with custom JSON preset serialization (no kotlinx.serialization for presets)
 - `service/` - `VoiceAssistantService` (foreground service with full pipeline: audio capture → VAD → STT → LLM → TTS), `WakeWordDetectionService` (separate lightweight wake word listener)
 - `ui/chat/` - `ChatViewModel` + `ChatScreen` (single conversation history; the old QuickChat pair was removed when quick chat became the wake-word service)
-- `ui/wake/` - `WakeChatViewModel` + `WakeChatScreen`: always-on hands-free service. Records clips with `recordAudioWithVAD`, transcribes, and when `matchesWakeWord` hits it strips the phrase from the transcript and sends the remainder to the LLM. `MainActivity` starts/stops it from a `LaunchedEffect` on `enableWakeWordDetection`; the card rises from the bottom via `AnimatedVisibility` + `slideInVertically`
+- `ui/wake/` - `WakeChatViewModel` + `WakeChatScreen`: always-on hands-free service. Records clips with `recordAudioWithVAD`, decides "was the wake phrase spoken?" **on-device** with `WakeWordDetector` (MFCC + DTW, see below), and only then uses STT to turn the request that follows the phrase into text. `MainActivity` starts/stops it from a `LaunchedEffect` on `enableWakeWordDetection`; the card rises from the bottom via `AnimatedVisibility` + `slideInVertically`
 - `ui/settings/` - `SettingsViewModel` with preset management and model fetching, `SettingsScreen`
-- `ui/common/` - `CommonUtilities.kt`: audio recording helpers, WAV conversion, TTS playback, text splitting, chat export
+- `ui/common/` - `CommonUtilities.kt`: audio recording helpers, WAV conversion, TTS playback, text splitting, chat export. `WakeWordDetector.kt`: the on-device wake-word matcher - `extractWakeFeatures`/`mfcc` (10 ms MFCC features, 40 ms frames, radix-2 FFT), `bestMatchCost` (DTW against enrolled references), `wakeCostThreshold(sensitivity)`, and `loadWakeReferences`/`saveWakeReference`/`clearWakeReferences` persisting references in `<filesDir>/wake_references.txt`
 - `ui/theme/` - `Theme.kt`: Gruvbox dark/light color schemes (Material3)
 - `receiver/` - `AppBootReceiver` (restarts service on boot), `NetworkStateReceiver` (restarts on network change)
 - `widget/` - `VoiceAssistantWidget` (home screen widget for quick mic control)
@@ -80,7 +80,8 @@ adb shell am start -W -n com.localassistant.app/.ui.MainActivity
 ## Things the Agent Should NEVER Do
 - Never hardcode API endpoints - always use values from `AppSettings` loaded via `SettingsRepository`
 - Never make blocking network calls on main thread - all OkHttp calls must be in coroutines with `Dispatchers.IO`
-- Never add an external wake-word runtime (Porcupine/Snowboy) to `WakeWordDetectionService` or `WakeChatViewModel` without checking licence and on-device footprint - wake matching is currently transcript-based via `CommonUtilities.matchesWakeWord`
+- Never add an external wake-word runtime (Porcupine/Snowboy/rustpotter as a native library) without checking licence and on-device footprint - this Kotlin toolchain has **no C FFI**: `android.util.CLibrary` and `@JNI` are both unresolved, so a Rust `.so` cannot be loaded. The wake matcher is a pure-Kotlin port of rustpotter's References mode in `ui/common/WakeWordDetector.kt`
+- Never trigger the wake word from the STT transcript - the trigger must be on-device (`WakeWordDetector`); STT may only transcribe the request after the phrase has matched
 - Never remove foreground service notifications - they are required by Android API 35+ and declared in AndroidManifest.xml
 - Never commit API keys or base URLs that contain credentials to version control
 - Never use `kotlinx.serialization` for preset JSON - the project uses manual string building/parsing (see SettingsRepository preset methods)
@@ -108,7 +109,9 @@ adb shell am start -W -n com.localassistant.app/.ui.MainActivity
 - **TTS 0-byte bug**: The proxy API (Piper) returns empty responses if `response_format` is not set to `"wav"` in TTS requests - always include this parameter when modifying TTS endpoints
 - **MediaPlayer looping**: Never rely on completion listeners; always calculate duration and wait explicitly for audio playback
 - **Streaming state cleanup**: `_streamingContent.value = ""` must be called AFTER adding the final assistant message, not before (see ChatViewModel.sendMessage)
-- **QuickChat vs Main Chat**: QuickChat has its own separate `MutableStateFlow<List<ChatMessage>>` (`_messages`) independent from main conversation. They do NOT share history.
+- **QuickChat vs Main Chat**: QuickChat was retired when the wake-word service became its own ViewModel. The wake chat keeps its own `_messages` StateFlow, independent from the main conversation history.
+- **Wake word needs enrollment**: `WakeWordDetector` has no built-in phrase - it matches the recorded clip against user-enrolled WAV references stored in `<filesDir>/wake_references.txt` (max 8, each ≤500 frames). With zero references the wake service reports "No wake-word references recorded" and never fires. Settings exposes "Record Reference"/"Clear References" buttons and the recorded count.
+- **Wake DTW threshold is a guess**: `wakeCostThreshold(sensitivity)` maps 0→10.0 and 1→1.0 (clamped ≥0.5). The cost scale is unverified on real speech; the Settings "Test Wake Word" action prints the measured cost vs the threshold so the user can tune sensitivity.
 - **Gruvbox Theme**: Primary is `#F2A94C` (warm yellow), secondary is `#D75D00` (deep orange). The app defaults to dark theme. Avoid green/pink/blue colors - use Gruvbox palette throughout.
 - **Base URL normalization**: ApiClient strips `/chat/completions`, `/audio/transcriptions`, `/audio/speech` suffixes from base URLs before appending the correct endpoint path
 - **STT uses multipart/form-data**: Not JSON body - audio file is uploaded as `file` part with model as text part (standard OpenAI Whisper format)

@@ -4,10 +4,16 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import com.localassistant.app.data.remote.ApiClient
 import com.localassistant.app.data.settings.SettingsRepository
+import com.localassistant.app.ui.common.bestMatchCost
 import com.localassistant.app.ui.common.buildSilentWav
+import com.localassistant.app.ui.common.clearWakeReferences
+import com.localassistant.app.ui.common.extractWakeFeatures
 import com.localassistant.app.ui.common.loadBundledTestAudio
-import com.localassistant.app.ui.common.matchesWakeWord
+import com.localassistant.app.ui.common.loadWakeReferences
 import com.localassistant.app.ui.common.playAudioBytes
+import com.localassistant.app.ui.common.recordAudioWithVAD
+import com.localassistant.app.ui.common.saveWakeReference
+import com.localassistant.app.ui.common.wakeCostThreshold
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,7 +21,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * A saved settings preset with a name and the full settings snapshot.
@@ -87,7 +95,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
             "wakeWordName" -> _settings.update { it.copy(wakeWordName = value as String) }
             "wakeWordSensitivity" -> _settings.update { it.copy(wakeWordSensitivity = value as Float) }
-            "wakeWordModel" -> _settings.update { it.copy(wakeWordModel = value as String) }
             "enableWakeWordDetection" -> _settings.update { it.copy(enableWakeWordDetection = value as Boolean) }
 
             "vadSensitivity" -> _settings.update { it.copy(vadSensitivity = value as Float) }
@@ -232,6 +239,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     private val _wakeWordTesting = MutableStateFlow(false)
     val wakeWordTesting: StateFlow<Boolean> = _wakeWordTesting.asStateFlow()
+
+    // How many wake-word references the on-device detector can match against; read
+    // from the enrollment file so the count survives an app restart.
+    private val _wakeReferenceCount = MutableStateFlow(loadWakeReferences(appContext).size)
+    val wakeReferenceCount: StateFlow<Int> = _wakeReferenceCount.asStateFlow()
 
     /**
      * Names the failure the way the user should see it: the exception type plus
@@ -504,45 +516,87 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     /**
-     * Runs the wake-word pipeline end to end: the STT endpoint transcribes the
-     * bundled sample and the result is fed to the matcher, exactly as the
-     * foreground service does it. The sample never contains the wake word, so a
-     * "not heard" verdict still means both halves of the pipeline work.
+     * Records one bounded utterance from the microphone, used by the wake-word
+     * enrollment and test actions.
+     */
+    private suspend fun recordWakeClip(): ByteArray? = withContext(Dispatchers.IO) {
+        recordAudioWithVAD(appContext, java.util.concurrent.atomic.AtomicBoolean(false))
+    }
+
+    /**
+     * Records the wake phrase and enrolls it as a reference the on-device detector
+     * matches against. Several takes make matching more reliable, so this is
+     * expected to be tapped repeatedly.
+     */
+    fun recordWakeReference() {
+        _wakeWordTesting.value = true
+        viewModelScope.launch {
+            val clip = recordWakeClip()
+            if (clip == null || clip.isEmpty()) {
+                _wakeWordStatus.value = EndpointStatus(false, "No audio captured - check the microphone")
+            } else {
+                val features = extractWakeFeatures(clip)
+                if (features.isEmpty()) {
+                    _wakeWordStatus.value = EndpointStatus(false, "Clip too short to describe - speak the whole phrase")
+                } else if (!saveWakeReference(appContext, features)) {
+                    _wakeWordStatus.value = EndpointStatus(false, "Could not save the reference")
+                } else {
+                    _wakeReferenceCount.value = loadWakeReferences(appContext).size
+                    _wakeWordStatus.value = EndpointStatus(
+                        true,
+                        "Reference enrolled - ${_wakeReferenceCount.value} recorded. More takes match better."
+                    )
+                }
+            }
+            _wakeWordTesting.value = false
+        }
+    }
+
+    /**
+     * Drops every enrolled wake-word reference, so the detector matches nothing
+     * until new takes are recorded.
+     */
+    fun clearWakeWordReferences() {
+        clearWakeReferences(appContext)
+        _wakeReferenceCount.value = 0
+        _wakeWordStatus.value = null
+    }
+
+    /**
+     * Tests the on-device detector end to end: records a live clip and reports the
+     * dynamic time warping cost against the enrolled references. No endpoint is
+     * involved, so this is exactly the decision the wake service makes.
      */
     fun runWakeWordTest() {
         val currentSettings = _settings.value
         _wakeWordTesting.value = true
         viewModelScope.launch {
-            try {
-                val sample = loadBundledTestAudio(appContext)
-                if (sample.isEmpty()) {
-                    _wakeWordStatus.value = EndpointStatus(false, "Bundled test audio (assets/voice_clone.wav) is missing")
+            val references = loadWakeReferences(appContext)
+            if (references.isEmpty()) {
+                _wakeWordStatus.value = EndpointStatus(false, "No references enrolled - record the wake phrase first")
+            } else {
+                val clip = recordWakeClip()
+                if (clip == null || clip.isEmpty()) {
+                    _wakeWordStatus.value = EndpointStatus(false, "No audio captured - check the microphone")
                 } else {
-                    val transcript = ApiClient.transcribeAudio(
-                        currentSettings.sttBaseUrl,
-                        if (currentSettings.sttApiKey.isBlank()) null else currentSettings.sttApiKey,
-                        sample,
-                        currentSettings.sttModelName
-                    ).trim()
-                    if (transcript.isEmpty()) {
-                        _wakeWordStatus.value = EndpointStatus(false, "STT returned an empty transcript")
-                    } else {
-                        val matched = matchesWakeWord(
-                            transcript,
-                            currentSettings.wakeWordName,
-                            currentSettings.wakeWordSensitivity
-                        )
-                        _wakeWordStatus.value = EndpointStatus(
-                            true,
-                            if (matched) "Pipeline works - '${currentSettings.wakeWordName}' would trigger"
-                            else "Pipeline works - '${currentSettings.wakeWordName}' not heard in the sample (expected)"
-                        )
-                    }
+                    val cost = bestMatchCost(extractWakeFeatures(clip), references)
+                    val threshold = wakeCostThreshold(currentSettings.wakeWordSensitivity)
+                    _wakeWordStatus.value = EndpointStatus(
+                        cost <= threshold,
+                        if (cost <= threshold)
+                            "Matched '${currentSettings.wakeWordName}' on-device (cost ${formatCost(cost)} <= ${formatCost(threshold)})"
+                        else
+                            "No match (cost ${formatCost(cost)} > ${formatCost(threshold)}) - raise sensitivity or record the phrase again"
+                    )
                 }
-            } catch (e: Exception) {
-                _wakeWordStatus.value = EndpointStatus(false, describeFailure(e))
             }
             _wakeWordTesting.value = false
         }
     }
+
+    /**
+     * One decimal is enough to tell how far a clip was from the threshold.
+     */
+    private fun formatCost(value: Float): String =
+        if (value >= Float.MAX_VALUE / 2.0f) "no match" else ((value * 10.0f).toInt() / 10.0f).toString()
 }
