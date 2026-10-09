@@ -55,6 +55,10 @@ class WakeChatService : VoiceInteractionService() {
         // Action constants for service commands
         const val ACTION_START = "com.localassistant.START_WAKE_CHAT"
         const val ACTION_STOP = "com.localassistant.STOP_WAKE_CHAT"
+        // The action the system itself uses to start a voice-interaction service -
+        // the same one the manifest declares, so a platform that hosts hands-free
+        // conversations can open this service without the app being involved.
+        const val ACTION_VOICE_INTERACTION = "android.service.voice.VoiceInteractionService"
 
         // Phases the overlay shows
         const val PHASE_IDLE = "idle"
@@ -132,7 +136,10 @@ class WakeChatService : VoiceInteractionService() {
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START -> startListening()
+            // The app's own hands-free switch, and the action the system uses when
+            // it opens this service as its voice interaction service - both mean
+            // "listen", and startListening() is idempotent so the two cannot stack.
+            ACTION_START, ACTION_VOICE_INTERACTION -> startListening()
             ACTION_STOP -> stopListening()
         }
 
