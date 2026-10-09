@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Tells the platform which of LocalAssistant's services host hands-free
+    conversations and which one draws them over the system UI. The system reads
+    this through the "android.voice_interaction" meta-data item declared next to
+    the wake service in AndroidManifest.xml.
+-->
+<voice-interaction-service>
+    <my-service service="com.localassistant.app.service.WakeChatService"/>
+    <session-service service="com.localassistant.app.service.WakeChatSessionService"/>
+</voice-interaction-service>

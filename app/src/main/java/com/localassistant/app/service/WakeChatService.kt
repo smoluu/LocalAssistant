@@ -350,6 +350,10 @@ class WakeChatService : VoiceInteractionService() {
             // The reply has to reach the user while the app is minimized, so it
             // travels in the notification as well as on the overlay.
             updateNotification(reply)
+            // Ask the system to draw the exchange over whatever the device is
+            // showing, before the reply is spoken - the user can read it while
+            // they listen.
+            requestSession(request, reply)
             _phase.value = PHASE_SPEAKING
             playTTSAudio(
                 text = reply,
@@ -366,6 +370,26 @@ class WakeChatService : VoiceInteractionService() {
         }
         delay(OVERLAY_HIDE_MS)
         hideOverlay()
+    }
+
+    /**
+     * Ask the platform to show a voice session carrying this exchange.
+     *
+     * The session is drawn by [WakeChatSessionService] in its own process, so it
+     * cannot read this service's state and the text has to be handed over in the
+     * bundle. The platform only accepts a request once [onReady] has finished,
+     * and a platform may refuse sessions altogether, so a failure here is logged
+     * and the exchange still reaches the user through the notification and TTS.
+     */
+    private fun requestSession(request: String, reply: String) {
+        try {
+            val args = android.os.Bundle()
+            args.putString(SESSION_REQUEST_KEY, request)
+            args.putString(SESSION_REPLY_KEY, reply)
+            showSession(args, 0)
+        } catch (e: Exception) {
+            android.util.Log.w("WakeChatService", "Session request failed: ${e.message}")
+        }
     }
 
     /**

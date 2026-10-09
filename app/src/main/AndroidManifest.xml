@@ -92,6 +92,10 @@
             what lets a platform that hosts hands-free conversations instantiate
             this class as its own voice service and draw the exchange over the
             system UI and whatever app the device is showing.
+
+            The meta-data item points at the resource that names this service and
+            the session service that draws its exchanges; without it the platform
+            has no way to find the session half.
         -->
         <service
             android:name=".service.WakeChatService"
@@ -100,7 +104,23 @@
             <intent-filter>
                 <action android:name="android.service.voice.VoiceInteractionService" />
             </intent-filter>
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/voice_interaction" />
         </service>
+
+        <!--
+            WAKE CHAT SESSION SERVICE
+
+            The drawing half of the wake pipeline. The system instantiates this
+            class when it wants to show a voice exchange and composes the window
+            it returns into a window of type TYPE_VOICE_INTERACTION, which sits
+            over the home screen or over whatever app the device is showing - the
+            only place the wake chat can appear while the app is minimized.
+        -->
+        <service
+            android:name=".service.WakeChatSessionService"
+            android:exported="false" />
 
         <!--
             BOOT COMPLETED RECEIVER
