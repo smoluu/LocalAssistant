@@ -95,7 +95,18 @@ fun ChatScreen(
         // Auto-scroll to the bottom while the AI is responding, and whenever the
         // user is already near the bottom (so we don't yank them away from history).
         if (totalItems > 0 && (isStreaming || lazyListState.isNearBottom())) {
-            lazyListState.animateScrollToItem(totalItems - 1)
+            // Scrolling to the last item only pins its *top* at the viewport top, so
+            // every new streamed line of a growing response falls below the fold.
+            // Offsetting that item by its own overflow past the viewport puts its
+            // bottom at the bottom instead, which is where the newest text is.
+            val layout = lazyListState.layoutInfo
+            val lastIndex = totalItems - 1
+            val lastVisible = layout.visibleItemsInfo.lastOrNull()
+            if (lastVisible != null && lastVisible.index == lastIndex) {
+                lazyListState.animateScrollToItem(lastIndex, lastVisible.size - layout.viewportSize.height)
+            } else {
+                lazyListState.animateScrollToItem(lastIndex)
+            }
         }
 
         // Track last assistant message for auto-TTS - only trigger when streaming is COMPLETE
@@ -647,7 +658,8 @@ fun ChatScreen(
                                     StreamingResponseIndicator(
                                         content = streamingContent.value,
                                         reasoningContent = streamingReasoning.value,
-                                        ttsSettings = Pair(settings.ttsBaseUrl, if (settings.ttsApiKey.isBlank()) null else settings.ttsApiKey)
+                                        ttsSettings = Pair(settings.ttsBaseUrl, if (settings.ttsApiKey.isBlank()) null else settings.ttsApiKey),
+                                        autoExpandReasoning = settings.autoExpandReasoning
                                     )
                                 }
                             }
@@ -813,7 +825,12 @@ internal fun MessageBubble(
 
             // Reasoning/thinking section (collapsible) - only for assistant messages with reasoning
             if (!isUser && message.reasoningContent != null && message.reasoningContent.isNotBlank()) {
-                var isReasoningExpanded by remember { mutableStateOf(autoExpandReasoning) }
+                // The setting is part of the remember key: a lazily rendered row keeps its
+                // remembered state across re-renders, so without it flipping the
+                // "auto-expand reasoning" switch would never reach rows already on screen.
+                var isReasoningExpanded by remember(message.id, autoExpandReasoning) {
+                    mutableStateOf(autoExpandReasoning)
+                }
                 
                 Card(
                     modifier = Modifier.fillMaxWidth()
@@ -939,10 +956,11 @@ internal fun MessageBubble(
 internal fun StreamingResponseIndicator(
     content: String,
     reasoningContent: String = "",
-    ttsSettings: Pair<String?, String?>? = null
+    ttsSettings: Pair<String?, String?>? = null,
+    autoExpandReasoning: Boolean = true
 ) {
     var isExpanded by remember { mutableStateOf(false) }
-    var isReasoningExpanded by remember { mutableStateOf(true) }
+    var isReasoningExpanded by remember(autoExpandReasoning) { mutableStateOf(autoExpandReasoning) }
     
     Card(
         modifier = Modifier.fillMaxWidth(),
