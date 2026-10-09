@@ -55,6 +55,9 @@ class VoiceAssistantService : Service() {
         // Retry configuration for API calls
         private const val MAX_RETRIES = 3
         private const val RETRY_DELAY_MS = 1000L
+
+        // Sample rate used while the battery is low
+        private const val ENERGY_SAVING_SAMPLE_RATE = 8000
         
         /**
          * Build an intent for this service with the given action.
@@ -81,6 +84,8 @@ class VoiceAssistantService : Service() {
     private var sampleRate = 16000
     private var channelConfig = AudioFormat.CHANNEL_IN_MONO
     private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
+    // Rate the device accepted at startup - energy saving restores to this, not to 16kHz.
+    private var startupSampleRate = 16000
     
     // Energy-saving mode state
     @Volatile
@@ -135,8 +140,10 @@ class VoiceAssistantService : Service() {
         // Register battery receiver for energy-saving mode
         try {
             val filter = IntentFilter(Intent.ACTION_BATTERY_CHANGED)
-            registerReceiver(batteryReceiver, filter)
-            checkBatteryLevel() // Check immediately on start
+            val initialIntent = registerReceiver(batteryReceiver, filter)
+            // registerReceiver() returns the current battery intent, so the level can be
+            // read once here without registering a second anonymous receiver.
+            checkBatteryLevel(initialIntent)
         } catch (e: Exception) {
             android.util.Log.w("VoiceAssistantService", "Failed to register battery receiver: ${e.message}")
         }
@@ -211,6 +218,7 @@ class VoiceAssistantService : Service() {
             )
             if (minBufferSize > 0) {
                 sampleRate = 11025
+                startupSampleRate = 11025
                 android.util.Log.w("VoiceAssistantService", "Falling back to 11kHz sample rate")
             } else {
                 // Try 8kHz as last resort
@@ -219,12 +227,41 @@ class VoiceAssistantService : Service() {
                 )
                 if (minBufferSize > 0) {
                     sampleRate = 8000
+                    startupSampleRate = 8000
                     android.util.Log.w("VoiceAssistantService", "Falling back to 8kHz sample rate")
                 } else {
                     android.util.Log.e("VoiceAssistantService", "No supported sample rate found for mono PCM")
                     throw RuntimeException("No supported audio configuration found")
                 }
             }
+        }
+    }
+
+    /**
+     * Rebuild the AudioRecord at a different sample rate. The recorder is created once
+     * at startup, so changing sampleRate alone would make convertToWav stamp a header
+     * that does not match the captured stream.
+     */
+    private fun applySampleRate(newRate: Int) {
+        if (newRate == sampleRate) return
+        val previous = audioRecord ?: return
+        try {
+            val bufferSize = AudioRecord.getMinBufferSize(newRate, channelConfig, audioFormat)
+            if (bufferSize <= 0) {
+                android.util.Log.w("VoiceAssistantService", "Rate ${newRate}Hz not supported, keeping ${sampleRate}Hz")
+                return
+            }
+            val replacement = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                newRate, channelConfig, audioFormat, bufferSize * 4
+            )
+            previous.stop()
+            previous.release()
+            replacement.startRecording()
+            audioRecord = replacement
+            sampleRate = newRate
+        } catch (e: Exception) {
+            android.util.Log.w("VoiceAssistantService", "Could not switch to ${newRate}Hz: ${e.message}")
         }
     }
 
@@ -951,44 +988,43 @@ class VoiceAssistantService : Service() {
     private val batteryReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == Intent.ACTION_BATTERY_CHANGED) {
-                checkBatteryLevel()
+                checkBatteryLevel(intent)
             }
         }
     }
-    
+
     /**
      * Check battery level and adjust audio quality accordingly.
      * When battery < 20%: reduce sample rate to 8kHz for energy saving.
-     * When charging or battery >= 20%: restore normal settings (16kHz).
+     * When charging or battery >= 20%: restore the rate negotiated at startup.
      */
-    private fun checkBatteryLevel() {
+    private fun checkBatteryLevel(intent: Intent?) {
         try {
-            val levelIntent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-            if (levelIntent != null) {
-                val level = levelIntent.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, 100)
-                val scale = levelIntent.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100)
-                val status = levelIntent.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1)
-                val isCharging = status == android.os.BatteryManager.BATTERY_STATUS_CHARGING
-                
-                val batteryPercent = (level * 100 / scale.toFloat()).toInt()
-                
-                if (isCharging) {
-                    // Restore normal settings when charging
-                    if (energySavingMode) {
-                        energySavingMode = false
-                        android.util.Log.d("VoiceAssistantService", "Battery charging - restoring normal audio quality")
-                        updateNotification("Normal mode - Charging")
-                    }
-                } else if (batteryPercent < 20 && !energySavingMode) {
-                    // Enter energy-saving mode
-                    energySavingMode = true
-                    sampleRate = 8000 // Reduce from 16kHz to 8kHz
-                    android.util.Log.d("VoiceAssistantService", "Low battery ($batteryPercent%) - entering energy-saving mode (8kHz)")
-                    updateNotification("Energy saving mode - $batteryPercent%")
-                } else if (!energySavingMode && batteryPercent >= 20) {
-                    // Normal operation
-                    android.util.Log.d("VoiceAssistantService", "Battery level: $batteryPercent% - normal operation")
+            if (intent == null) return
+            val level = intent.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, 100)
+            val scale = intent.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100)
+            val status = intent.getIntExtra(android.os.BatteryManager.EXTRA_STATUS, -1)
+            val isCharging = status == android.os.BatteryManager.BATTERY_STATUS_CHARGING
+
+            val batteryPercent = (level * 100 / scale.toFloat()).toInt()
+
+            if (isCharging) {
+                // Restore normal settings when charging
+                if (energySavingMode) {
+                    energySavingMode = false
+                    applySampleRate(startupSampleRate)
+                    android.util.Log.d("VoiceAssistantService", "Battery charging - restoring normal audio quality")
+                    updateNotification("Normal mode - Charging")
                 }
+            } else if (batteryPercent < 20 && !energySavingMode) {
+                // Enter energy-saving mode
+                energySavingMode = true
+                applySampleRate(ENERGY_SAVING_SAMPLE_RATE)
+                android.util.Log.d("VoiceAssistantService", "Low battery ($batteryPercent%) - entering energy-saving mode (${ENERGY_SAVING_SAMPLE_RATE}Hz)")
+                updateNotification("Energy saving mode - $batteryPercent%")
+            } else if (!energySavingMode && batteryPercent >= 20) {
+                // Normal operation
+                android.util.Log.d("VoiceAssistantService", "Battery level: $batteryPercent% - normal operation")
             }
         } catch (e: Exception) {
             android.util.Log.w("VoiceAssistantService", "Failed to check battery level: ${e.message}")
