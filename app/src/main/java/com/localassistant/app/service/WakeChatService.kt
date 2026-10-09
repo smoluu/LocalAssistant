@@ -3,7 +3,9 @@ package com.localassistant.app.service
 import android.Manifest
 import android.app.*
 import android.content.Intent
+import android.os.Bundle
 import android.os.IBinder
+import android.service.voice.VoiceInteractionService
 import androidx.annotation.RequiresPermission
 import androidx.core.app.NotificationCompat
 import com.localassistant.app.LocalAssistantApplication
@@ -14,6 +16,7 @@ import com.localassistant.app.ui.common.bestMatchCost
 import com.localassistant.app.ui.common.extractWakeFeatures
 import com.localassistant.app.ui.common.isNonSpeechTranscript
 import com.localassistant.app.ui.common.loadWakeReferences
+import com.localassistant.app.ui.common.playWakeCue
 import com.localassistant.app.ui.common.playTTSAudio
 import com.localassistant.app.ui.common.recordAudioWithVAD
 import com.localassistant.app.ui.common.wakeCostThreshold
@@ -35,8 +38,15 @@ import kotlinx.coroutines.withContext
  *
  * The state the overlay draws lives in [Constants] because a service instance is
  * created outside the app's view-model tree; the ViewModel only forwards it.
+ *
+ * The class implements [VoiceInteractionService], the system's own hook for hands-free
+ * conversations. When the platform hosts one (Live Voice), it detects the hotword,
+ * records and transcribes the request itself and calls the callbacks below, so the
+ * exchange is drawn over the system UI and whatever app the device is showing.
+ * Where the platform has no such service, the callbacks are never called and the
+ * app's own loop below is the one that runs.
  */
-class WakeChatService : Service() {
+class WakeChatService : VoiceInteractionService() {
 
     companion object Constants {
         const val NOTIFICATION_ID = 3001
@@ -131,6 +141,73 @@ class WakeChatService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    // ==================== Voice interaction (system-driven path) ====================
+    //
+    // A platform that hosts hands-free conversations owns the always-on hotword
+    // detector, the microphone and the conversation UI that is drawn over every
+    // other app; this class is its only window into our app, so the exchange is
+    // raised, lowered and reported here. Where the platform has no such
+    // infrastructure, none of these callbacks run and the app's own loop below is
+    // the one that keeps the device hands-free.
+
+    override fun onReady() {
+        // The system's hotword detector is ready, which is its own signal that
+        // listening may begin. Starting here is idempotent, so the app can still
+        // start the loop itself on a platform that never calls this.
+        startListening()
+    }
+
+    override fun onShutdown() {
+        // The system is standing its voice infrastructure down, so the loop that
+        // feeds it stops with it and the card slides away.
+        stopListening()
+        hideOverlay()
+    }
+
+    override fun onLaunchVoiceAssistFromKeyguard() {
+        // From the lock screen there is nothing of ours to draw over, so the
+        // notification is the channel that carries the state.
+        _phase.value = PHASE_LISTENING
+        updateNotification(getPhaseText(PHASE_LISTENING))
+    }
+
+    /**
+     * The system is about to draw a voice session over whatever the device is
+     * showing, so raise our own card for the same moment. The bundle carries the
+     * system's own session arguments, which we never read - we only mirror the
+     * state into the overlay and the notification.
+     */
+    override fun onPrepareToShowSession(args: android.os.Bundle, flags: Int) {
+        showOverlay("")
+        _phase.value = PHASE_LISTENING
+        updateNotification(getPhaseText(PHASE_LISTENING))
+    }
+
+    override fun onShowSessionFailed(args: android.os.Bundle) {
+        _phase.value = PHASE_ERROR
+        _statusMessage.value = "The voice session could not be shown"
+        updateNotification("The voice session could not be shown")
+    }
+
+    /**
+     * Report which of the system's voice actions this app can serve. Every request
+     * is answered as a chat turn by the local LLM, so any action offered is one we
+     * can take.
+     */
+    override fun onGetSupportedVoiceActions(voiceActions: Set<String>): Set<String> {
+        return voiceActions
+    }
+
+    override fun onTimeout(timeoutMillis: Int) {
+        _statusMessage.value = "The request timed out"
+        updateNotification("The request timed out")
+    }
+
+    override fun onTimeout(timeoutMillis: Int, flags: Int) {
+        _statusMessage.value = "The request timed out"
+        updateNotification("The request timed out")
+    }
+
     /**
      * Start the always-on listening loop. Idempotent so re-entry cannot stack
      * several loops on one service instance.
@@ -192,7 +269,9 @@ class WakeChatService : Service() {
             val references = loadWakeReferences(appContext)
             if (references.isEmpty()) {
                 // Nothing can match yet, so this is the one case worth showing.
-                showOverlay("No wake-word references recorded - open Settings and speak the phrase")
+                val hint = "No wake-word references recorded - open Settings and speak the phrase"
+                showOverlay(hint)
+                updateNotification(hint)
                 delay(REFERENCE_HINT_MS)
                 hideOverlay()
                 continue
@@ -205,69 +284,81 @@ class WakeChatService : Service() {
                 continue
             }
 
-            // The trigger has already fired on-device, so STT is only reached once the
-            // phrase is heard and only turns the request into text: the phrase may be
-            // followed by it in the same breath, and when the user said the phrase
-            // alone the next utterance is the request.
+            // The wake clip is never transcribed: the phrase has already been
+            // recognised on-device, so sending it to STT would put the wake word in
+            // front of the request. The chime is the user's cue that the microphone
+            // is recording now, and it has to finish before the recording starts.
             showOverlay("")
             _phase.value = PHASE_LISTENING
-            val heard = transcribe(currentSettings, clip) ?: ""
-            var request = if (isNonSpeechTranscript(heard)) "" else stripWakePhrase(heard, currentSettings.wakeWordName)
-            if (request.isBlank()) {
-                _phase.value = PHASE_LISTENING
-                val requestClip = withContext(Dispatchers.IO) {
-                    recordAudioWithVAD(appContext, stopSignal)
-                }
-                if (!listening) break
-                request = if (requestClip == null || requestClip.isEmpty()) {
-                    ""
-                } else {
-                    // A request clip that only holds whisper.cpp's bracketed markers is
-                    // not speech, so it must not reach the LLM either.
-                    val requestText = transcribe(currentSettings, requestClip) ?: ""
-                    if (isNonSpeechTranscript(requestText)) "" else requestText
-                }
+            updateNotification(getPhaseText(PHASE_LISTENING))
+            playWakeCue()
+
+            val requestClip = withContext(Dispatchers.IO) {
+                recordAudioWithVAD(appContext, stopSignal)
+            }
+            if (!listening) break
+            val request = if (requestClip == null || requestClip.isEmpty()) {
+                ""
+            } else {
+                // A request clip that only holds whisper.cpp's bracketed markers is
+                // not speech, so it must not reach the LLM either.
+                val requestText = transcribe(currentSettings, requestClip) ?: ""
+                if (isNonSpeechTranscript(requestText)) "" else requestText
             }
 
             if (request.isBlank()) {
                 _statusMessage.value = "Could not hear the request"
+                updateNotification("Could not hear the request")
                 delay(OVERLAY_HIDE_MS)
                 hideOverlay()
                 continue
             }
 
-            _messages.update { current ->
-                current + listOf(ChatMessage.user(request))
-            }
-            _phase.value = PHASE_THINKING
-
-            val reply = complete(currentSettings, request)
-            if (reply.isNotBlank()) {
-                _messages.update { current ->
-                    current + listOf(ChatMessage.assistant(reply))
-                }
-                // The reply has to reach the user while the app is minimized, so it
-                // travels in the notification as well as on the overlay.
-                updateNotification(reply)
-                _phase.value = PHASE_SPEAKING
-                playTTSAudio(
-                    text = reply,
-                    ttsSettings = Pair(
-                        currentSettings.ttsBaseUrl,
-                        if (currentSettings.ttsApiKey.isBlank()) null else currentSettings.ttsApiKey
-                    ),
-                    model = currentSettings.ttsModelName,
-                    voice = currentSettings.ttsVoiceName,
-                    responseFormat = currentSettings.ttsResponseFormat,
-                    enableStreaming = currentSettings.enableTtsStreaming,
-                    timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
-                )
-            }
-            delay(OVERLAY_HIDE_MS)
-            hideOverlay()
+            answer(request, currentSettings)
         }
         _overlay.value = false
         _phase.value = PHASE_IDLE
+    }
+
+    /**
+     * Answer a request the pipeline has settled on - whether the words came from
+     * our own recorder or from the system's voice interaction service - by asking
+     * the LLM and speaking the reply. Both paths share this so the exchange
+     * behaves identically whichever one heard the user.
+     */
+    private suspend fun answer(
+        request: String,
+        currentSettings: com.localassistant.app.domain.model.AppSettings
+    ) {
+        _messages.update { current ->
+            current + listOf(ChatMessage.user(request))
+        }
+        _phase.value = PHASE_THINKING
+
+        val reply = complete(currentSettings, request)
+        if (reply.isNotBlank()) {
+            _messages.update { current ->
+                current + listOf(ChatMessage.assistant(reply))
+            }
+            // The reply has to reach the user while the app is minimized, so it
+            // travels in the notification as well as on the overlay.
+            updateNotification(reply)
+            _phase.value = PHASE_SPEAKING
+            playTTSAudio(
+                text = reply,
+                ttsSettings = Pair(
+                    currentSettings.ttsBaseUrl,
+                    if (currentSettings.ttsApiKey.isBlank()) null else currentSettings.ttsApiKey
+                ),
+                model = currentSettings.ttsModelName,
+                voice = currentSettings.ttsVoiceName,
+                responseFormat = currentSettings.ttsResponseFormat,
+                enableStreaming = currentSettings.enableTtsStreaming,
+                timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
+            )
+        }
+        delay(OVERLAY_HIDE_MS)
+        hideOverlay()
     }
 
     /**
@@ -291,6 +382,9 @@ class WakeChatService : Service() {
         } catch (e: Exception) {
             android.util.Log.w("WakeChatService", "STT failed: ${e.message}")
             _statusMessage.value = "STT failed: ${e.message}"
+            // The reason has to reach the user while the app is minimized, so it
+            // travels in the notification as well as on the overlay.
+            updateNotification("STT failed: ${e.message}")
             null
         }
     }
@@ -319,21 +413,9 @@ class WakeChatService : Service() {
         } catch (e: Exception) {
             android.util.Log.w("WakeChatService", "LLM failed: ${e.message}")
             _statusMessage.value = "LLM failed: ${e.message}"
+            updateNotification("LLM failed: ${e.message}")
             ""
         }
-    }
-
-    /**
-     * Drop the wake phrase from a transcript so only the request remains.
-     * Matching is case-insensitive and tolerant of the punctuation STT adds after it.
-     */
-    private fun stripWakePhrase(transcript: String, wakeWord: String): String {
-        val phrase = wakeWord.trim().lowercase()
-        if (phrase.isEmpty()) return transcript.trim()
-
-        val at = transcript.lowercase().indexOf(phrase)
-        if (at < 0) return transcript.trim()
-        return transcript.substring(at + phrase.length).trim().trimStart(',', ' ').trim()
     }
 
     // ==================== Notification Management ====================
@@ -367,7 +449,6 @@ class WakeChatService : Service() {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(intent)
-            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
             .build()
     }
 

@@ -590,6 +590,54 @@ fun loadBundledTestAudio(context: android.content.Context): ByteArray {
 fun buildSilentWav(durationMs: Int = 500, sampleRate: Int = 16000): ByteArray =
     convertPcmToWav(ByteArray(sampleRate * 2 * durationMs / 1000), sampleRate)
 
+// Sample rate the synthesised wake cue is played at.
+private const val WAKE_CUE_SAMPLE_RATE = 16000
+
+/**
+ * Plays the short chime that tells the user the wake phrase was heard and that
+ * the microphone is now recording their request.
+ *
+ * The cue is synthesised rather than bundled as an asset so it needs no file, no
+ * decoder and no endpoint, and so it still plays when the app is minimized and
+ * only the service process is left. It blocks until the chime has finished, which
+ * is what the wake pipeline needs: the request recording must not start before the
+ * user has heard that they can speak.
+ */
+fun playWakeCue(): Boolean {
+    val durationMs = 320
+    val samples = FloatArray(WAKE_CUE_SAMPLE_RATE * durationMs / 1000)
+    addFadingNote(samples, 0, 180, 1046.5f, 0.30f)
+    addFadingNote(samples, 100, 240, 1396.9f, 0.22f)
+
+    val pcm = ByteArray(samples.size * 2)
+    samples.forEachIndexed { index, value ->
+        val sample = (value * Short.MAX_VALUE).toInt().coerceIn(-Short.MAX_VALUE.toInt(), Short.MAX_VALUE.toInt())
+        pcm[index * 2] = (sample and 0xFF).toByte()
+        pcm[index * 2 + 1] = ((sample shr 8) and 0xFF).toByte()
+    }
+    return playPcmAudio(pcm, WAKE_CUE_SAMPLE_RATE)
+}
+
+/**
+ * Adds one struck note to the buffer: full amplitude at the strike, then an
+ * exponential fade. A constant amplitude would sound like a beep, not a ding.
+ */
+private fun addFadingNote(
+    samples: FloatArray,
+    startMs: Int,
+    durationMs: Int,
+    frequencyHz: Float,
+    peak: Float
+) {
+    val start = WAKE_CUE_SAMPLE_RATE * startMs / 1000
+    val end = minOf(samples.size, WAKE_CUE_SAMPLE_RATE * (startMs + durationMs) / 1000)
+    for (index in start..end - 1) {
+        val t = (index - start).toDouble() / WAKE_CUE_SAMPLE_RATE
+        val fade = kotlin.math.exp(-t / (durationMs / 3000.0)).toFloat()
+        samples[index] += peak * fade * kotlin.math.sin(2.0 * kotlin.math.PI * frequencyHz.toDouble() * t).toFloat()
+    }
+}
+
 /**
  * Decides whether a transcript is the configured wake word.
  *

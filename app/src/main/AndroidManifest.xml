@@ -31,6 +31,10 @@
     <!-- For requesting battery optimization exemption -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- Lets the system host our voice chat as its own voice-interaction service,
+         so the exchange can be drawn over the system UI and other apps. -->
+    <uses-permission android:name="android.permission.BIND_VOICE_INTERACTION" />
+
     <!-- Bluetooth for headset controls (optional enhancement) -->
     <!-- <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" /> -->
 
@@ -83,11 +87,20 @@
             the background, so the conversation keeps working while the app is
             minimized. Its persistent notification carries the reply and reopens the
             app when tapped.
+
+            The intent-filter declares the voice-interaction interface, which is
+            what lets a platform that hosts hands-free conversations instantiate
+            this class as its own voice service and draw the exchange over the
+            system UI and whatever app the device is showing.
         -->
         <service
             android:name=".service.WakeChatService"
             android:foregroundServiceType="microphone"
-            android:exported="false" />
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+        </service>
 
         <!--
             BOOT COMPLETED RECEIVER
