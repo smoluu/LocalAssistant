@@ -4,6 +4,7 @@ import android.app.Activity
 import android.os.Bundle
 import android.service.voice.VoiceInteractionSession
 import android.service.voice.VoiceInteractionSessionService
+import android.util.Log
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -60,6 +61,7 @@ class WakeChatSessionService : VoiceInteractionSessionService() {
      * around a context the widgets can be measured against.
      */
     override fun onNewSession(args: android.os.Bundle): VoiceInteractionSession {
+        Log.i("WakeChatSessionService", "The system asked for a session: $args")
         return WakeChatSession(android.app.Activity())
     }
 }
@@ -91,6 +93,10 @@ private class WakeChatSession(private val context: android.app.Activity) : Voice
      * spoke, then the reply, in the app's Gruvbox colours.
      */
     override fun onCreateContentView(): View {
+        Log.i(
+            "WakeChatSessionService",
+            "Building the card for a ${request.length}-character request and a ${reply.length}-character reply"
+        )
         val card = LinearLayout(context)
         card.setPadding(24, 20, 24, 20)
         card.setBackgroundColor(SURFACE)

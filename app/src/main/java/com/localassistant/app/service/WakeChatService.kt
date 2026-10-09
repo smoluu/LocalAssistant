@@ -156,8 +156,17 @@ class WakeChatService : VoiceInteractionService() {
     // raised, lowered and reported here. Where the platform has no such
     // infrastructure, none of these callbacks run and the app's own loop below is
     // the one that keeps the device hands-free.
+    //
+    // The platform only reaches this class once the user has picked LocalAssistant
+    // as the system's assistant, so onReady() is the proof of that choice: the
+    // base class resolves the system's voice interaction manager here, and every
+    // session request below depends on it having resolved.
 
     override fun onReady() {
+        android.util.Log.i(
+            "WakeChatService",
+            "onReady: the system has bound this app as its voice interaction service"
+        )
         // The system's hotword detector is ready, which is its own signal that
         // listening may begin. Starting here is idempotent, so the app can still
         // start the loop itself on a platform that never calls this.
@@ -386,6 +395,7 @@ class WakeChatService : VoiceInteractionService() {
             val args = android.os.Bundle()
             args.putString(SESSION_REQUEST_KEY, request)
             args.putString(SESSION_REPLY_KEY, reply)
+            android.util.Log.i("WakeChatService", "Asking the system to draw this exchange")
             showSession(args, 0)
         } catch (e: Exception) {
             android.util.Log.w("WakeChatService", "Session request failed: ${e.message}")
