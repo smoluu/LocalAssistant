@@ -22,25 +22,14 @@ class SettingsRepository(private val context: Context) {
     private val sharedPreferences: SharedPreferences = 
         context.getSharedPreferences("settings", Context.MODE_PRIVATE)
 
+    // Unset settings fall back to the defaults declared in AppSettings itself, so
+    // there is a single source of truth for what a fresh install looks like.
+    private val defaults = com.localassistant.app.domain.model.AppSettings()
+
     companion object {
-        // Default values
-        const val DEFAULT_LLM_BASE_URL = "http://192.168.1.2:8080/v1"
-        const val DEFAULT_LLM_MODEL_NAME = "llama-3.1-8b-instruct"
-        const val DEFAULT_STT_BASE_URL = "http://192.168.1.2:8080/v1"
-        const val DEFAULT_STT_MODEL_NAME = "whisper-large-v3"
-        const val DEFAULT_TTS_BASE_URL = "http://192.168.1.2:5001/v1"
-        const val DEFAULT_TTS_MODEL_NAME = "piper-en"
-        const val DEFAULT_TTS_VOICE_NAME = "en_US-ryan-high"
-        const val DEFAULT_TTS_RESPONSE_FORMAT = "mp3"
-        const val DEFAULT_SYSTEM_PROMPT = """You are LocalAssistant, running on the user's Android device.
-|Answer in one or two short sentences, in plain words that will be read aloud.
-|Give the answer directly: do not explain your reasoning, list steps, repeat the question or greet the user.
-|Never use markdown, bullet points, numbering or emoji.
-|If you are unsure or cannot help, say so honestly in one short sentence."""
-        const val DEFAULT_WAKE_WORD_NAME = "hey assistant"
-        const val DEFAULT_WAKE_WORD_SENSITIVITY = 0.5f
-        const val DEFAULT_VAD_SENSITIVITY = 0.4f
-        const val DEFAULT_VAD_MIN_SILENCE_MS = 800
+        // The Settings screen offers this as a "Restore default prompt" action, so it
+        // has to come from AppSettings - declaring it here again would let the two drift.
+        val DEFAULT_SYSTEM_PROMPT = com.localassistant.app.domain.model.AppSettings().systemPrompt
 
         // Preset storage keys
         const val PREFS_PRESETS_KEY = "presets_list"
@@ -54,46 +43,46 @@ class SettingsRepository(private val context: Context) {
      */
     fun loadSettings(): com.localassistant.app.domain.model.AppSettings {
         return com.localassistant.app.domain.model.AppSettings(
-            llmBaseUrl = sharedPreferences.getString("llm_base_url", DEFAULT_LLM_BASE_URL) ?: DEFAULT_LLM_BASE_URL,
-            llmModelName = sharedPreferences.getString("llm_model_name", DEFAULT_LLM_MODEL_NAME) ?: DEFAULT_LLM_MODEL_NAME,
-            llmApiKey = sharedPreferences.getString("llm_api_key", "") ?: "",
-            
-            sttBaseUrl = sharedPreferences.getString("stt_base_url", DEFAULT_STT_BASE_URL) ?: DEFAULT_STT_BASE_URL,
-            sttModelName = sharedPreferences.getString("stt_model_name", DEFAULT_STT_MODEL_NAME) ?: DEFAULT_STT_MODEL_NAME,
-            sttApiKey = sharedPreferences.getString("stt_api_key", "") ?: "",
-            
-            ttsBaseUrl = sharedPreferences.getString("tts_base_url", DEFAULT_TTS_BASE_URL) ?: DEFAULT_TTS_BASE_URL,
-            ttsModelName = sharedPreferences.getString("tts_model_name", DEFAULT_TTS_MODEL_NAME) ?: DEFAULT_TTS_MODEL_NAME,
-            ttsVoiceName = sharedPreferences.getString("tts_voice_name", DEFAULT_TTS_VOICE_NAME) ?: DEFAULT_TTS_VOICE_NAME,
-            ttsApiKey = sharedPreferences.getString("tts_api_key", "") ?: "",
-            ttsResponseFormat = sharedPreferences.getString("tts_response_format", DEFAULT_TTS_RESPONSE_FORMAT) ?: DEFAULT_TTS_RESPONSE_FORMAT,
-            enableTtsStreaming = sharedPreferences.getBoolean("enable_tts_streaming", false),
+            llmBaseUrl = sharedPreferences.getString("llm_base_url", defaults.llmBaseUrl) ?: defaults.llmBaseUrl,
+            llmModelName = sharedPreferences.getString("llm_model_name", defaults.llmModelName) ?: defaults.llmModelName,
+            llmApiKey = sharedPreferences.getString("llm_api_key", defaults.llmApiKey) ?: defaults.llmApiKey,
 
-            autoTtsEnabled = sharedPreferences.getBoolean("auto_tts_enabled", true),
-            autoExpandReasoning = sharedPreferences.getBoolean("auto_expand_reasoning", true),
+            sttBaseUrl = sharedPreferences.getString("stt_base_url", defaults.sttBaseUrl) ?: defaults.sttBaseUrl,
+            sttModelName = sharedPreferences.getString("stt_model_name", defaults.sttModelName) ?: defaults.sttModelName,
+            sttApiKey = sharedPreferences.getString("stt_api_key", defaults.sttApiKey) ?: defaults.sttApiKey,
 
-            systemPrompt = sharedPreferences.getString("system_prompt", DEFAULT_SYSTEM_PROMPT) ?: DEFAULT_SYSTEM_PROMPT,
-            
-            wakeWordName = sharedPreferences.getString("wake_word_name", DEFAULT_WAKE_WORD_NAME) ?: DEFAULT_WAKE_WORD_NAME,
-            wakeWordSensitivity = sharedPreferences.getFloat("wake_word_sensitivity", DEFAULT_WAKE_WORD_SENSITIVITY),
-            enableWakeWordDetection = sharedPreferences.getBoolean("enable_wake_word", true),
-            
-            vadSensitivity = sharedPreferences.getFloat("vad_sensitivity", DEFAULT_VAD_SENSITIVITY),
-            vadMinSilenceDurationMs = sharedPreferences.getInt("vad_min_silence_ms", DEFAULT_VAD_MIN_SILENCE_MS),
-            continuousConversationMode = sharedPreferences.getBoolean("continuous_conversation", false),
-            
-            enableForegroundService = sharedPreferences.getBoolean("enable_foreground_service", true),
-            autoStartOnBoot = sharedPreferences.getBoolean("auto_start_on_boot", true),
-            batteryOptimizationExempted = sharedPreferences.getInt("battery_optimization_exempted", 0) == 1,
-            darkModeEnabled = sharedPreferences.getBoolean("dark_mode_enabled", true),
+            ttsBaseUrl = sharedPreferences.getString("tts_base_url", defaults.ttsBaseUrl) ?: defaults.ttsBaseUrl,
+            ttsModelName = sharedPreferences.getString("tts_model_name", defaults.ttsModelName) ?: defaults.ttsModelName,
+            ttsVoiceName = sharedPreferences.getString("tts_voice_name", defaults.ttsVoiceName) ?: defaults.ttsVoiceName,
+            ttsApiKey = sharedPreferences.getString("tts_api_key", defaults.ttsApiKey) ?: defaults.ttsApiKey,
+            ttsResponseFormat = sharedPreferences.getString("tts_response_format", defaults.ttsResponseFormat) ?: defaults.ttsResponseFormat,
+            enableTtsStreaming = sharedPreferences.getBoolean("enable_tts_streaming", defaults.enableTtsStreaming),
+
+            autoTtsEnabled = sharedPreferences.getBoolean("auto_tts_enabled", defaults.autoTtsEnabled),
+            autoExpandReasoning = sharedPreferences.getBoolean("auto_expand_reasoning", defaults.autoExpandReasoning),
+
+            systemPrompt = sharedPreferences.getString("system_prompt", defaults.systemPrompt) ?: defaults.systemPrompt,
+
+            wakeWordName = sharedPreferences.getString("wake_word_name", defaults.wakeWordName) ?: defaults.wakeWordName,
+            wakeWordSensitivity = sharedPreferences.getFloat("wake_word_sensitivity", defaults.wakeWordSensitivity),
+            enableWakeWordDetection = sharedPreferences.getBoolean("enable_wake_word", defaults.enableWakeWordDetection),
+
+            vadSensitivity = sharedPreferences.getFloat("vad_sensitivity", defaults.vadSensitivity),
+            vadMinSilenceDurationMs = sharedPreferences.getInt("vad_min_silence_ms", defaults.vadMinSilenceDurationMs),
+            continuousConversationMode = sharedPreferences.getBoolean("continuous_conversation", defaults.continuousConversationMode),
+
+            enableForegroundService = sharedPreferences.getBoolean("enable_foreground_service", defaults.enableForegroundService),
+            autoStartOnBoot = sharedPreferences.getBoolean("auto_start_on_boot", defaults.autoStartOnBoot),
+            batteryOptimizationExempted = sharedPreferences.getInt("battery_optimization_exempted", if (defaults.batteryOptimizationExempted) 1 else 0) == 1,
+            darkModeEnabled = sharedPreferences.getBoolean("dark_mode_enabled", defaults.darkModeEnabled),
 
             // Advanced / Debug Settings
-            debugLoggingEnabled = sharedPreferences.getBoolean("debug_logging_enabled", false),
-            httpTimeoutSeconds = sharedPreferences.getInt("http_timeout_seconds", 60),
-            forceHttps = sharedPreferences.getBoolean("force_https", false),
+            debugLoggingEnabled = sharedPreferences.getBoolean("debug_logging_enabled", defaults.debugLoggingEnabled),
+            httpTimeoutSeconds = sharedPreferences.getInt("http_timeout_seconds", defaults.httpTimeoutSeconds),
+            forceHttps = sharedPreferences.getBoolean("force_https", defaults.forceHttps),
 
             // Localization
-            preferredLocale = sharedPreferences.getString("preferred_locale", "") ?: ""
+            preferredLocale = sharedPreferences.getString("preferred_locale", defaults.preferredLocale) ?: defaults.preferredLocale
         )
     }
 

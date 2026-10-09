@@ -990,8 +990,9 @@ class VoiceAssistantService : Service() {
     
     // ==================== Wake Word Detection ====================
     //
-    // Wake matching is transcript-based (CommonUtilities.matchesWakeWord, used by
-    // WakeChatViewModel). An on-device keyword runtime would plug in here, but its
+    // This service has no wake matching of its own - the hands-free pipeline lives in
+    // WakeChatService, which matches clips on-device against the enrolled references
+    // (see WakeWordDetector). An on-device keyword runtime would plug in there, and its
     // licence and on-device footprint must be checked before adding one.
 
     // ==================== Energy-Saving Mode ====================

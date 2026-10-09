@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Dark variant of the palette, mirroring GruvboxDarkColorScheme in
+        ui/theme/Theme.kt. The names are the same as the light palette so both
+        themes reference the same tokens and only the variant directory decides
+        which values are used.
+    -->
+
+    <!-- Primary Brand Color -->
+    <color name="primary">#F2A94C</color>
+    <color name="on_primary">#2B2B2B</color>
+
+    <!-- Secondary Brand Color -->
+    <color name="secondary">#D75D00</color>
+    <color name="on_secondary">#2B2B2B</color>
+
+    <!-- Tertiary Brand Color -->
+    <color name="tertiary">#CC8836</color>
+    <color name="on_tertiary">#333333</color>
+
+    <!-- Error Color -->
+    <color name="error">#CC3D2B</color>
+    <color name="on_error">#2B2B2B</color>
+
+    <!-- Background Colors -->
+    <color name="background">#2B2B2B</color>
+    <color name="surface">#333333</color>
+    <color name="on_surface">#E8E8E8</color>
+
+    <!-- Navigation Bar -->
+    <color name="navigation_bar">#2B2B2B</color>
+
+    <!-- Listening State Colors (for UI feedback) -->
+    <color name="listening_active">#4CAF50</color>
+    <color name="processing_active">#FFC107</color>
+    <color name="speaking_active">#2196F3</color>
+    <color name="error_state">#F44336</color>
+</resources>

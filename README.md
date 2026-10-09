@@ -5,10 +5,11 @@ A privacy-first, fully local AI voice assistant for Android that connects to you
 ## Features
 
 ### Core Capabilities
-- **Always-on Wake Word Detection** - Detects "Hey Assistant", "Computer", or custom wake words with minimal battery impact
+- **On-Device Wake Word Detection** - Matches your own recorded phrases against the microphone clip on-device (no built-in phrase, no cloud, no external runtime); detection never fires on silence or room noise
 - **Voice Pipeline** - Complete voice interaction: STT → LLM → TTS
 - **Barge-in Support** - Interrupt the assistant while it's speaking
 - **Continuous Conversation Mode** - Automatic listening after each response
+- **Hands-Free Overlay Outside The App** - The exchange is drawn over the home screen or whatever the device is showing, through a voice interaction session service
 
 ### Privacy & Security
 - 100% local processing - all AI runs on your own hardware
@@ -47,10 +48,10 @@ A privacy-first, fully local AI voice assistant for Android that connects to you
 │  └──────────────────────────────────────────────┘   │
 ├─────────────────────────────────────────────────────┤
 │                  Data Layer                          │
-│  ┌──────────────┐  ┌──────────────┐                │
-│  │ Room DB      │  │ DataStore    │                │
-│  │ (Chat History)│ │ (Settings)   │                │
-│  └──────────────┘  └──────────────┘                │
+│  ┌──────────────┐  ┌──────────────────┐            │
+│  │ Room DB      │  │ SharedPreferences│            │
+│  │ (Chat History)│ │ (Settings)       │            │
+│  └──────────────┘  └──────────────────┘            │
 ├─────────────────────────────────────────────────────┤
 │              External Services (Local)               │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐         │
@@ -128,10 +129,10 @@ The app will request:
 ## Usage
 
 ### Starting the Assistant
-1. Open the app
-2. Tap the microphone button in the bottom bar
-3. Say your wake word ("Hey Assistant", "Computer", or "Jarvis")
-4. Speak your command after detection
+1. Open the app → Settings → Wake Word and record one or more references of the phrase you want to say ("Record Reference"). Detection only matches those recordings.
+2. Tap the microphone button in the bottom bar to start listening
+3. Say the phrase you enrolled
+4. Speak your command after the confirmation chime
 5. The assistant will respond via TTS
 
 ### Voice Controls
@@ -142,7 +143,7 @@ The app will request:
 ### Settings
 Configure all aspects of the assistant:
 - API endpoints and model names
-- Wake word phrase and sensitivity
+- Wake word references (recorded on-device) and match sensitivity
 - Voice activity detection settings
 - System prompt for custom behavior
 - Service controls (foreground service, continuous mode)
@@ -170,23 +171,38 @@ app/
 │   │   ├── WakeChatService.kt          # Hands-free wake-word service (a VoiceInteractionService)
 │   │   └── WakeChatSessionService.kt   # Draws the exchange over the system UI (a VoiceInteractionSessionService)
 │   ├── ui/                             # Compose UI
-│   │   ├── MainActivity.kt             # Entry point & navigation
+│   │   ├── MainActivity.kt             # Entry point, navigation & wake overlay
 │   │   ├── chat/                       # Chat screen components
 │   │   │   ├── ChatScreen.kt           # Main chat interface
 │   │   │   └── ChatViewModel.kt        # Chat state management
-│   │   └── settings/                   # Settings screen components
-│   │       ├── SettingsScreen.kt       # Configuration UI
-│   │       └── SettingsViewModel.kt    # Settings state management
-│   └── receiver/                       # Broadcast receivers
-│       ├── AppBootReceiver.kt          # Boot completed handler
-│       └── NetworkStateReceiver.kt     # Network connectivity monitor
+│   │   ├── wake/                       # Hands-free wake overlay (renderer only)
+│   │   │   ├── WakeChatScreen.kt
+│   │   │   └── WakeChatViewModel.kt
+│   │   ├── settings/                   # Settings screen components
+│   │   │   ├── SettingsScreen.kt       # Configuration UI
+│   │   │   └── SettingsViewModel.kt    # Settings state management
+│   │   ├── common/                     # Audio helpers, VAD, wake-word matcher
+│   │   │   ├── CommonUtilities.kt
+│   │   │   └── WakeWordDetector.kt
+│   │   └── theme/                      # Gruvbox Material3 colour schemes
+│   │       └── Theme.kt
+│   ├── receiver/                       # Broadcast receivers
+│   │   ├── AppBootReceiver.kt          # Boot completed handler
+│   │   └── NetworkStateReceiver.kt     # Network connectivity monitor
+│   └── widget/                         # Home-screen widget
+│       └── VoiceAssistantWidget.kt
 ├── src/main/res/
-│   ├── values/                         # String resources & themes
+│   ├── values/                         # Light string resources & themes
 │   │   ├── strings.xml                 # All string resources
-│   │   ├── colors.xml                  # Color definitions
+│   │   ├── colors.xml                  # Light palette (mirrors Theme.kt)
 │   │   └── themes.xml                  # App theme configuration
+│   ├── values-night/                   # Dark variants of the same tokens
+│   │   ├── colors.xml
+│   │   └── themes.xml
 │   └── xml/
-│       └── network_security_config.xml # Network security config
+│       ├── network_security_config.xml # Cleartext HTTP to local endpoints
+│       ├── voice_interaction.xml       # Names the voice service and its session half
+│       └── widget_voice_assistant.xml  # Widget descriptor
 ├── build.gradle.kts                    # Module-level Gradle config
 └── AndroidManifest.xml                 # App manifest with permissions
 ```
@@ -209,14 +225,12 @@ app/
 
 ## Future Enhancements
 
-- [ ] Integrate openWakeWord Android library for wake word detection
 - [ ] Implement VAD (Voice Activity Detection) with silero-vad
 - [ ] Add barge-in support via AudioTrack interruption handling
 - [ ] Implement Media3 ExoPlayer for TTS audio playback
 - [ ] Add Hilt DI for better testability
 - [ ] Implement encrypted storage for API keys
-- [ ] Add widget for quick access
-- [ ] Support multiple wake words with different actions
+- [ ] Support multiple wake phrases with different actions
 
 ## License
 

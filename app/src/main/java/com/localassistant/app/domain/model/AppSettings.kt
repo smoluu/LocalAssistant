@@ -3,7 +3,7 @@ package com.localassistant.app.domain.model
 /**
  * Application settings for the Local Assistant.
  * 
- * All values are persisted via DataStore and can be configured by the user.
+ * All values are persisted via SharedPreferences (see SettingsRepository) and can be configured by the user.
  */
 data class AppSettings(
     // LLM Configuration

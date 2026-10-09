@@ -67,7 +67,7 @@
             VOICE ASSISTANT FOREGROUND SERVICE
 
             This service handles:
-            - Wake word detection (openWakeWord)
+            - Wake word detection (the on-device matcher in ui/common/WakeWordDetector.kt)
             - Speech recognition (STT endpoint)
             - LLM chat completion
             - TTS audio playback
