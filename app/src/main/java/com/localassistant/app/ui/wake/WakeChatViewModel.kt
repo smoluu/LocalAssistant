@@ -44,8 +44,11 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
 
-    private val _awake = MutableStateFlow(false)
-    val awake: StateFlow<Boolean> = _awake.asStateFlow()
+    // Whether the wake overlay is on screen. It is raised only once the phrase
+    // has been heard and lowered again after the exchange, so an app that is
+    // simply listening shows nothing over whatever screen is open.
+    private val _overlay = MutableStateFlow(false)
+    val overlay: StateFlow<Boolean> = _overlay.asStateFlow()
 
     private val _phase = MutableStateFlow("idle")
     val phase: StateFlow<String> = _phase.asStateFlow()
@@ -64,7 +67,7 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
         if (listening) return
         listening = true
         stopSignal.set(false)
-        _awake.value = true
+        _overlay.value = false
         _phase.value = "detecting"
         viewModelScope.launch { wakeLoop() }
     }
@@ -72,9 +75,26 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
     fun stopListening() {
         listening = false
         stopSignal.set(true)
-        _awake.value = false
+        _overlay.value = false
         _phase.value = "idle"
         _statusMessage.value = ""
+    }
+
+    /**
+     * Raises the overlay, with an optional line to show on it.
+     */
+    private fun showOverlay(message: String) {
+        _overlay.value = true
+        _statusMessage.value = message
+    }
+
+    /**
+     * Lowers the overlay and returns to listening, so an idle app never covers
+     * the screen it is on.
+     */
+    private fun hideOverlay() {
+        _overlay.value = false
+        _phase.value = "detecting"
     }
 
     private suspend fun wakeLoop() {
@@ -86,22 +106,26 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
 
             val currentSettings = settings.value
             if (clip == null || clip.isEmpty()) {
-                _statusMessage.value = "No audio captured - check the microphone"
-                _phase.value = "error"
-                delay(1500L)
+                // The recorder answers with nothing when no speech was heard, which
+                // is the common case while the app simply listens. Silence must never
+                // raise the overlay or report an error.
+                _statusMessage.value = ""
+                _phase.value = "detecting"
                 continue
             }
 
             val references = loadWakeReferences(context)
             if (references.isEmpty()) {
-                _statusMessage.value = "No wake-word references recorded - open Settings and speak the phrase"
-                _phase.value = "error"
-                delay(2000L)
+                // Nothing can match yet, so this is the one case worth showing.
+                showOverlay("No wake-word references recorded - open Settings and speak the phrase")
+                delay(REFERENCE_HINT_MS)
+                hideOverlay()
                 continue
             }
 
-            val cost = bestMatchCost(extractWakeFeatures(clip), references)
-            if (cost > wakeCostThreshold(currentSettings.wakeWordSensitivity, references)) {
+            val features = extractWakeFeatures(clip)
+            val cost = bestMatchCost(features, references)
+            if (features.isEmpty() || cost > wakeCostThreshold(currentSettings.wakeWordSensitivity, references)) {
                 _phase.value = "detecting"
                 continue
             }
@@ -110,6 +134,7 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
             // phrase is heard and only turns the request into text: the phrase may be
             // followed by it in the same breath, and when the user said the phrase
             // alone the next utterance is the request.
+            showOverlay("")
             _phase.value = "listening"
             val heard = transcribe(currentSettings, clip) ?: ""
             var request = if (isNonSpeechTranscript(heard)) "" else stripWakePhrase(heard, currentSettings.wakeWordName)
@@ -131,7 +156,8 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
 
             if (request.isBlank()) {
                 _statusMessage.value = "Could not hear the request"
-                _phase.value = "detecting"
+                delay(OVERLAY_HIDE_MS)
+                hideOverlay()
                 continue
             }
 
@@ -159,9 +185,10 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
                     timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
                 )
             }
-            _phase.value = "detecting"
+            delay(OVERLAY_HIDE_MS)
+            hideOverlay()
         }
-        _awake.value = false
+        _overlay.value = false
         _phase.value = "idle"
     }
 
@@ -193,6 +220,10 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
     private companion object Constants {
         // How many of the newest wake-chat turns are sent to the LLM as context.
         const val MAX_LLM_CONTEXT = 20
+        // How long the "nothing is enrolled yet" hint stays on the overlay.
+        const val REFERENCE_HINT_MS = 3000L
+        // How long the overlay stays up after an exchange before it slides away.
+        const val OVERLAY_HIDE_MS = 1500L
     }
 
     /**

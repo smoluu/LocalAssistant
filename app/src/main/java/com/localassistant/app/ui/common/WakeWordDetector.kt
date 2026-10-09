@@ -17,22 +17,45 @@ private const val MFCC_CEPSTRAL = 4
 private const val MFCC_FEATURES = MFCC_CEPSTRAL * 2
 private const val FFT_SIZE = 1024
 private const val MIN_FRAMES = 5
-private const val MAX_REFERENCE_FRAMES = 500
+const val MAX_REFERENCE_FRAMES = 500
+// The same limit in seconds, so enrollment can ask the user to keep the phrase
+// short instead of quoting a frame count.
+const val MAX_REFERENCE_SECONDS = MAX_REFERENCE_FRAMES * MFCC_SHIFT / 16000
 private const val MAX_REFERENCES = 8
 // Floor so identical enrollments (spread 0) still leave a little tolerance.
 private const val MIN_MATCH_THRESHOLD = 0.5f
 // Fallback spread when fewer than two references are enrolled, in normalised units.
 private const val SINGLE_REFERENCE_SPREAD = 1.5f
 private const val REFERENCE_FILE = "wake_references.txt"
+// Samples are rescaled to this peak so enrollment and detection see the same
+// loudness whatever the microphone gain, the distance, or the volume was.
+private const val TARGET_PEAK = 0.9f
+// Moving-average window: a low-pass that keeps roughly everything below
+// half the sample rate divided by the window (~2.7 kHz at 16 kHz), where the
+// phrase's formants live and room noise does not.
+private const val LOWPASS_WINDOW = 3
+// Peak frame energy under which a clip is silence outright.
+private const val SILENCE_PEAK = 0.01f
+// A frame counts as voiced at this fraction of the loudest frame...
+private const val VOICED_FRACTION = 0.35f
+// ...and as silence below this one. Speech has both; noise is uniform.
+private const val QUIET_FRACTION = 0.12f
+private const val MIN_SPEECH_FRAMES = 3
+private const val MIN_QUIET_FRAMES = 2
 
 /**
  * Extracts the MFCC feature vectors of a WAV clip, returning an empty array when
- * the clip is too short to describe. The layout is row-major:
+ * the clip holds no speech. The layout is row-major:
  * [cepstral1..4, delta1..4] per 10 ms frame.
  */
 fun extractWakeFeatures(wavBytes: ByteArray): FloatArray {
     val parsed = parseWavBytes(wavBytes) ?: return FloatArray(0)
     val samples = pcmToFloats(parsed.second, parsed.first)
+    // Room noise must never reach the matcher: the features are normalised per
+    // dimension, so a clip of noise is scaled up to look exactly as "loud" as
+    // speech. Requiring voiced frames next to quiet ones is the one test that
+    // survives that normalisation, and it is gain-invariant.
+    if (!containsSpeech(samples)) return FloatArray(0)
     return mfcc(samples)
 }
 
@@ -60,11 +83,97 @@ private fun pcmToFloats(pcmBytes: ByteArray, sampleRate: Int): FloatArray {
 }
 
 /**
- * Extracts MFCC features from a normalised signal: 4 cepstral coefficients and
- * their deltas per frame, both Gaussian-smoothed over a 3-frame window.
+ * Low-passes the clip and then scales its gain to [TARGET_PEAK].
+ *
+ * Both steps exist so that a reference recorded in one place matches a clip
+ * recorded in another: the moving average drops the broadband part of room
+ * noise, and the gain scaling removes the microphone gain, the distance to the
+ * mouth and the speaking volume from the comparison. Nothing here is
+ * per-clip normalised later, so the two paths cannot drift apart.
+ */
+private fun prepareSignal(samples: FloatArray): FloatArray {
+    val out = FloatArray(samples.size)
+    for (i in samples.indices) {
+        var sum = 0.0f
+        var taps = 0
+        for (k in 0..<LOWPASS_WINDOW) {
+            val j = i + k - LOWPASS_WINDOW / 2
+            if (j >= 0 && j < samples.size) {
+                sum += samples[j]
+                taps++
+            }
+        }
+        out[i] = sum / taps
+    }
+    normalizeGain(out)
+    return out
+}
+
+/**
+ * Scales the whole clip so its loudest sample sits at [TARGET_PEAK].
+ *
+ * A clip that is already silent stays silent: scaling it up would turn room
+ * noise into loud noise, which the feature normalisation would then make
+ * indistinguishable from speech.
+ */
+private fun normalizeGain(samples: FloatArray) {
+    var peak = 0.0f
+    for (value in samples) {
+        val abs = if (value < 0.0f) -value else value
+        if (abs > peak) peak = abs
+    }
+    if (peak < 1.0e-5f) return
+
+    val scale = TARGET_PEAK / peak
+    for (i in samples.indices) {
+        samples[i] = samples[i] * scale
+    }
+}
+
+/**
+ * Decides whether a clip holds speech at all, before any feature is built.
+ *
+ * The test is relative to the clip's own loudest frame, so it survives gain
+ * normalisation: speech is loud frames with quiet ones around it, while room
+ * noise is one uniform level and silence has no loud frame. Either missing case
+ * returns false, which is what keeps a quiet room from firing the wake word.
+ */
+private fun containsSpeech(samples: FloatArray): Boolean {
+    val frameCount = (samples.size - MFCC_FRAME) / MFCC_SHIFT + 1
+    if (frameCount < MIN_FRAMES) return false
+
+    val energies = FloatArray(frameCount)
+    var peak = 0.0f
+    for (t in 0..<frameCount) {
+        val offset = t * MFCC_SHIFT
+        var sum = 0.0
+        for (i in 0..<MFCC_FRAME) {
+            val s = samples[offset + i].toDouble()
+            sum += s * s
+        }
+        val rms = kotlin.math.sqrt(sum / MFCC_FRAME).toFloat()
+        energies[t] = rms
+        if (rms > peak) peak = rms
+    }
+    if (peak < SILENCE_PEAK) return false
+
+    var voiced = 0
+    var quiet = 0
+    for (energy in energies) {
+        if (energy >= peak * VOICED_FRACTION) voiced++
+        if (energy <= peak * QUIET_FRACTION) quiet++
+    }
+    return voiced >= MIN_SPEECH_FRAMES && quiet >= MIN_QUIET_FRAMES
+}
+
+/**
+ * Applies the same signal preparation to every clip - the enrolled references
+ * and the live detection both come through here, so a reference is always
+ * comparable to the clip that is being matched against it.
  */
 fun mfcc(samples: FloatArray): FloatArray {
-    val frameCount = (samples.size - MFCC_FRAME) / MFCC_SHIFT + 1
+    val signal = prepareSignal(samples)
+    val frameCount = (signal.size - MFCC_FRAME) / MFCC_SHIFT + 1
     if (frameCount < MIN_FRAMES) return FloatArray(0)
 
     val half = MFCC_FRAME / 2
@@ -85,7 +194,7 @@ fun mfcc(samples: FloatArray): FloatArray {
     for (t in 0..<frameCount) {
         val offset = t * MFCC_SHIFT
         for (i in 0..<FFT_SIZE) {
-            re[i] = if (i < MFCC_FRAME) samples[offset + i] else 0.0f
+            re[i] = if (i < MFCC_FRAME) signal[offset + i] else 0.0f
             im[i] = 0.0f
         }
         fft(re, im)
@@ -292,12 +401,13 @@ private fun euclidean(a: FloatArray, aOffset: Int, b: FloatArray, bOffset: Int):
  * cost is how much the user's own takes of the same phrase already differ from
  * each other, so accepting up to a multiple of that spread needs no absolute
  * constant that would depend on volume, phrase length or microphone.
- * Sensitivity scales that multiple: strict stays near the observed spread,
- * lenient accepts several times it.
+ * Sensitivity scales that multiple across the slider: the strict end asks for
+ * better than the spread the user's own takes already show, the lenient end
+ * accepts several times it.
  */
 fun wakeCostThreshold(sensitivity: Float, references: List<FloatArray>): Float {
     val clamped = kotlin.math.max(0.0f, kotlin.math.min(1.0f, sensitivity))
-    val factor = 1.2f + 2.6f * (1.0f - clamped)
+    val factor = 0.6f + 2.4f * (1.0f - clamped)
     return (referenceSpread(references) * factor).coerceAtLeast(MIN_MATCH_THRESHOLD)
 }
 
@@ -351,6 +461,12 @@ fun loadWakeReferences(context: Context): List<FloatArray> {
         emptyList()
     }
 }
+
+/**
+ * Number of 10 ms frames a feature sequence holds. Enrollment reports a rejected
+ * clip in these units so the user knows how much to trim, not in raw floats.
+ */
+fun referenceFrameCount(features: FloatArray): Int = features.size / MFCC_FEATURES
 
 /**
  * Appends one reference to the enrollment file, keeping the newest entries

@@ -21,15 +21,17 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.localassistant.app.ui.wake.WakeChatViewModel
 
 /**
- * Screen for the wake-word chat service.
+ * The wake-word chat as an app-level overlay.
  *
- * The card rises from the bottom of the screen when the wake phrase is heard,
- * then the conversation is shown exactly like the main chat shows it.
+ * It is drawn above whichever screen is open - chat, settings, or the home view -
+ * and nothing is painted while the app is only listening. The card rises from the
+ * bottom when the wake phrase is heard, and the conversation stays inside it until
+ * the exchange ends.
  */
 @Composable
 fun WakeChatScreen(viewModel: WakeChatViewModel = viewModel()) {
     val messages by viewModel.messages.collectAsState()
-    val awake by viewModel.awake.collectAsState()
+    val overlay by viewModel.overlay.collectAsState()
     val phase by viewModel.phase.collectAsState()
     val statusMessage by viewModel.statusMessage.collectAsState()
 
@@ -37,13 +39,13 @@ fun WakeChatScreen(viewModel: WakeChatViewModel = viewModel()) {
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.BottomCenter,
         content = {
-            Column(
-                modifier = Modifier.width(420.dp).padding(horizontal = 16.dp).padding(bottom = 8.dp)
+            AnimatedVisibility(
+                visible = overlay,
+                enter = slideInVertically { fullHeight -> fullHeight } + fadeIn(),
+                exit = slideOutVertically { fullHeight -> fullHeight } + fadeOut()
             ) {
-                AnimatedVisibility(
-                    visible = awake,
-                    enter = slideInVertically { fullHeight -> fullHeight } + fadeIn(),
-                    exit = slideOutVertically { fullHeight -> fullHeight } + fadeOut()
+                Column(
+                    modifier = Modifier.width(420.dp).padding(horizontal = 16.dp).padding(bottom = 8.dp)
                 ) {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
@@ -89,26 +91,26 @@ fun WakeChatScreen(viewModel: WakeChatViewModel = viewModel()) {
                             }
                         }
                     }
-                }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
 
-                messages.takeLast(8).forEach { message ->
-                    Card(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (message.role.name == "USER") {
-                                MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-                            } else {
-                                MaterialTheme.colorScheme.surface
-                            }
-                        )
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Text(
-                                text = message.content,
-                                style = MaterialTheme.typography.bodyMedium
+                    messages.takeLast(8).forEach { message ->
+                        Card(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (message.role.name == "USER") {
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                                } else {
+                                    MaterialTheme.colorScheme.surface
+                                }
                             )
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Text(
+                                    text = message.content,
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                            }
                         }
                     }
                 }

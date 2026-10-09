@@ -10,8 +10,11 @@ import com.localassistant.app.ui.common.clearWakeReferences
 import com.localassistant.app.ui.common.extractWakeFeatures
 import com.localassistant.app.ui.common.loadBundledTestAudio
 import com.localassistant.app.ui.common.loadWakeReferences
+import com.localassistant.app.ui.common.MAX_REFERENCE_FRAMES
+import com.localassistant.app.ui.common.MAX_REFERENCE_SECONDS
 import com.localassistant.app.ui.common.playAudioBytes
 import com.localassistant.app.ui.common.recordAudioWithVAD
+import com.localassistant.app.ui.common.referenceFrameCount
 import com.localassistant.app.ui.common.saveWakeReference
 import com.localassistant.app.ui.common.wakeCostThreshold
 import kotlinx.coroutines.CoroutineScope
@@ -239,6 +242,12 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     private val _wakeWordTesting = MutableStateFlow(false)
     val wakeWordTesting: StateFlow<Boolean> = _wakeWordTesting.asStateFlow()
+
+    // What the wake section is doing right now. The wake actions spend most of
+    // their time at the microphone, so the line has to say "Recording" rather
+    // than the generic endpoint wording used by the LLM/STT/TTS probes.
+    private val _wakeBusyLabel = MutableStateFlow("Contacting endpoint…")
+    val wakeBusyLabel: StateFlow<String> = _wakeBusyLabel.asStateFlow()
 
     // How many wake-word references the on-device detector can match against; read
     // from the enrollment file so the count survives an app restart.
@@ -531,13 +540,20 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     fun recordWakeReference() {
         _wakeWordTesting.value = true
         viewModelScope.launch {
+            _wakeBusyLabel.value = "Recording…"
             val clip = recordWakeClip()
+            _wakeBusyLabel.value = "Analysing on-device…"
             if (clip == null || clip.isEmpty()) {
-                _wakeWordStatus.value = EndpointStatus(false, "No audio captured - check the microphone")
+                _wakeWordStatus.value = EndpointStatus(false, "No speech heard - say the wake phrase while recording")
             } else {
                 val features = extractWakeFeatures(clip)
                 if (features.isEmpty()) {
-                    _wakeWordStatus.value = EndpointStatus(false, "Clip too short to describe - speak the whole phrase")
+                    _wakeWordStatus.value = EndpointStatus(false, "No speech found in the clip - speak the whole phrase")
+                } else if (referenceFrameCount(features) > MAX_REFERENCE_FRAMES) {
+                    _wakeWordStatus.value = EndpointStatus(
+                        false,
+                        "Clip too long - keep the phrase under $MAX_REFERENCE_SECONDS seconds"
+                    )
                 } else if (!saveWakeReference(appContext, features)) {
                     _wakeWordStatus.value = EndpointStatus(false, "Could not save the reference")
                 } else {
@@ -575,9 +591,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             if (references.isEmpty()) {
                 _wakeWordStatus.value = EndpointStatus(false, "No references enrolled - record the wake phrase first")
             } else {
+                _wakeBusyLabel.value = "Recording…"
                 val clip = recordWakeClip()
+                _wakeBusyLabel.value = "Matching on-device…"
                 if (clip == null || clip.isEmpty()) {
-                    _wakeWordStatus.value = EndpointStatus(false, "No audio captured - check the microphone")
+                    _wakeWordStatus.value = EndpointStatus(false, "No speech heard - say the wake phrase while testing")
                 } else {
                     val cost = bestMatchCost(extractWakeFeatures(clip), references)
                     val threshold = wakeCostThreshold(currentSettings.wakeWordSensitivity, references)

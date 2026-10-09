@@ -76,13 +76,17 @@ fun TestButton(label: String, enabled: Boolean, isLoading: Boolean, onClick: () 
  * message the ViewModel collected - including the HTTP error body on failures.
  */
 @Composable
-fun EndpointStatusLine(status: EndpointStatus?, busy: Boolean) {
+fun EndpointStatusLine(
+    status: EndpointStatus?,
+    busy: Boolean,
+    busyLabel: String = "Contacting endpoint…",
+) {
     if (busy) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "Contacting endpoint…",
+                text = busyLabel,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f)
@@ -163,6 +167,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, viewModel: SettingsViewModel = vi
     val wakeWordStatus by viewModel.wakeWordStatus.collectAsState()
     val wakeWordTesting by viewModel.wakeWordTesting.collectAsState()
     val wakeReferenceCount by viewModel.wakeReferenceCount.collectAsState()
+    val wakeBusyLabel by viewModel.wakeBusyLabel.collectAsState()
     val savedPresets by viewModel.presets.collectAsState()
 
     var showClearDataDialog by remember { mutableStateOf(false) }
@@ -246,7 +251,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, viewModel: SettingsViewModel = vi
             }
 
             SettingsSection("Wake Word", "🔑", "Say the phrase to start a conversation without tapping") {
-                EndpointStatusLine(wakeWordStatus, wakeWordTesting)
+                EndpointStatusLine(wakeWordStatus, wakeWordTesting, busyLabel = wakeBusyLabel)
                 SettingTextField("Wake Phrase", settings.wakeWordName, { viewModel.updateSetting("wakeWordName", it) }, "hey assistant")
                 Text(
                     text = "The phrase is recognised on-device from audio you record here: the clip is reduced to mel-frequency cepstral features and matched against your recordings with dynamic time warping. No model download and no endpoint is involved, so record the phrase a few times to make matching reliable.",
@@ -274,22 +279,25 @@ fun SettingsScreen(onNavigateBack: () -> Unit, viewModel: SettingsViewModel = vi
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Sensitivity:", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.align(Alignment.CenterVertically))
-                    Button(
-                        onClick = { viewModel.updateSetting("wakeWordSensitivity", 0.3f) },
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (settings.wakeWordSensitivity < 0.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
-                        )
-                    ) { Text("Lenient") }
-                    Button(
-                        onClick = { viewModel.updateSetting("wakeWordSensitivity", 0.7f) },
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (settings.wakeWordSensitivity > 0.5f) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
-                        )
-                    ) { Text("Strict") }
+                    Text(
+                        text = "Sensitivity:",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.align(Alignment.CenterVertically)
+                    )
+                    Slider(
+                        value = settings.wakeWordSensitivity,
+                        onValueChange = { viewModel.updateSetting("wakeWordSensitivity", it) },
+                        valueRange = 0f..1f,
+                        steps = 20,
+                        modifier = Modifier.weight(1f)
+                    )
                 }
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Drag it anywhere between the ends - now at ${(settings.wakeWordSensitivity * 100).toInt()}%. At 0% anything close to a reference wakes the app; at 100% only the exact takes you enrolled do. The threshold is measured from your own recordings, so it needs no absolute number.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 Spacer(modifier = Modifier.height(8.dp))
                 SettingSwitch("Wake Word Detection", settings.enableWakeWordDetection, { viewModel.updateSetting("enableWakeWordDetection", it) })
                 TestButton("Test Wake Word", true, wakeWordTesting) { viewModel.runWakeWordTest() }

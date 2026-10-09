@@ -108,6 +108,11 @@ fun recordAudioForSTT(
 /**
  * Records audio with Voice Activity Detection (VAD).
  * Uses energy-based VAD to detect speech breaks and automatically stop recording.
+ *
+ * Returns null when no speech was heard at all, and trims the clip to the
+ * utterance plus a short margin. Callers must treat "no speech" as "nothing
+ * happened": a clip of a quiet room is not an utterance, and enrolling it as a
+ * wake-word reference would describe the room instead of the phrase.
  */
 fun recordAudioWithVAD(
     context: Context,
@@ -139,6 +144,10 @@ fun recordAudioWithVAD(
 
     var speechDetected = false
     var lastSpeechTime: Long = 0
+    // Sample offsets of the first and last voiced chunk, so the returned clip
+    // can be cut to the utterance itself.
+    var firstSpeechSample = -1
+    var lastSpeechSample = -1
     val silenceThresholdMs = 1000L // Stop after 1s of silence once speech detected
     val minEnergy = 800 // Higher threshold to avoid background noise
 
@@ -176,12 +185,15 @@ fun recordAudioWithVAD(
 
             // Reset hasSpeechInChunk based on RMS energy, not individual samples
             var hasSpeechInChunk = rms > minEnergy
+            val chunkStartSample = audioBuffers.size
 
             android.util.Log.d("VAD", "Chunk $chunkCount: bytesRead=$bytesRead, RMS=$rms, speechDetected=$speechDetected")
 
             if (hasSpeechInChunk) {
                 lastSpeechTime = System.currentTimeMillis()
                 speechDetected = true
+                if (firstSpeechSample < 0) firstSpeechSample = chunkStartSample
+                lastSpeechSample = chunkStartSample + bytesRead
 
                 if (chunkCount % 160 == 0 && !stopSignal.get()) {
                     android.util.Log.d("VAD", "Recording... ${audioBuffers.size / 16000}s, RMS=$rms")
@@ -214,14 +226,26 @@ fun recordAudioWithVAD(
 
     android.util.Log.d("VAD", "Recording completed, ${audioBuffers.size} samples (${audioBuffers.size / sampleRate.toFloat()}s)")
 
-    if (audioBuffers.isEmpty()) return null
+    if (!speechDetected) {
+        android.util.Log.d("VAD", "No speech heard in this clip, returning nothing")
+        return null
+    }
+
+    // Cut to the utterance: a short margin on either side keeps the plosives
+    // at the edges, while the silent room around them would otherwise be
+    // carried into the wake matcher as noise.
+    val leadSamples = sampleRate * 3 / 10
+    val trailSamples = sampleRate / 2
+    val from = (firstSpeechSample - leadSamples).coerceAtLeast(0)
+    val to = (lastSpeechSample + trailSamples).coerceAtMost(audioBuffers.size)
+    if (to <= from) return null
 
     // Convert to WAV format (little-endian PCM)
-    val pcmBytes = ByteArray(audioBuffers.size * 2)
-    for (i in audioBuffers.indices) {
+    val pcmBytes = ByteArray((to - from) * 2)
+    for (i in from..<to) {
         val sample = audioBuffers[i].toInt()
-        pcmBytes[i * 2] = (sample and 0xFF).toByte()
-        pcmBytes[i * 2 + 1] = ((sample shr 8) and 0xFF).toByte()
+        pcmBytes[(i - from) * 2] = (sample and 0xFF).toByte()
+        pcmBytes[(i - from) * 2 + 1] = ((sample shr 8) and 0xFF).toByte()
     }
 
     return convertPcmToWav(pcmBytes, sampleRate)

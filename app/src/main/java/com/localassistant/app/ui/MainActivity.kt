@@ -266,6 +266,13 @@ class MainActivity : ComponentActivity() {
                         color = MaterialTheme.colorScheme.background
                     ) {
                         MainNavigation(hasPermissions = hasPermissions)
+                        // Drawn after the navigation screens, so the wake chat is an
+                        // app-level layer over whatever is on screen rather than part
+                        // of the chat screen.
+                        WakeOverlay(
+                            wakeEnabled = settings.enableWakeWordDetection,
+                            hasPermissions = hasPermissions
+                        )
                     }
                 }
             }
@@ -325,7 +332,6 @@ fun MainNavigation(hasPermissions: Boolean) {
     val navController = androidx.navigation.compose.rememberNavController()
     val context = LocalContext.current
     val viewModel = androidx.lifecycle.viewmodel.compose.viewModel<com.localassistant.app.ui.chat.ChatViewModel>()
-    val wakeViewModel = androidx.lifecycle.viewmodel.compose.viewModel<com.localassistant.app.ui.wake.WakeChatViewModel>()
     val chatSettings by viewModel.settings.collectAsState()
 
     // Observe incoming voice commands and add them to chat
@@ -383,19 +389,29 @@ fun MainNavigation(hasPermissions: Boolean) {
 
             composable("settings") {
                 SettingsScreen(
-                    onNavigateBack = { 
+                    onNavigateBack = {
                         performHapticFeedback(context)
-                        navController.popBackStack() 
+                        navController.popBackStack()
                     }
                 )
             }
         }
     }
+}
 
-    // Wake-word chat service: always listening while enabled, so the user never
-    // has to tap anything. The card rises from the bottom when the phrase is heard.
-    LaunchedEffect(chatSettings.enableWakeWordDetection, hasPermissions) {
-        if (chatSettings.enableWakeWordDetection && hasPermissions) {
+/**
+ * The wake-word chat as an app-level layer.
+ *
+ * It lives outside the navigation graph and is drawn last, so the card overlays
+ * whichever screen is open; the service itself starts from here because it must
+ * run while the app is open, not only while the chat screen is.
+ */
+@Composable
+fun WakeOverlay(wakeEnabled: Boolean, hasPermissions: Boolean) {
+    val wakeViewModel = androidx.lifecycle.viewmodel.compose.viewModel<com.localassistant.app.ui.wake.WakeChatViewModel>()
+
+    LaunchedEffect(wakeEnabled, hasPermissions) {
+        if (wakeEnabled && hasPermissions) {
             wakeViewModel.startListening()
         } else {
             wakeViewModel.stopListening()

@@ -27,6 +27,37 @@ class WakeWordDetectorTest {
         return out
     }
 
+    // A clip shaped like speech: loud bursts separated by real gaps. The
+    // detector rejects anything without quiet frames next to voiced ones, so
+    // fixtures that stand in for an utterance have to be built this way.
+    private fun speechPcm(samples: Int, amplitude: Int, period: Int): ByteArray {
+        val out = ByteArray(samples * 2)
+        for (i in 0..<samples) {
+            if ((i / period) % 4 >= 2) continue
+            val phase = kotlin.math.sin(2.0 * kotlin.math.PI * (i % period) / period)
+            val value = (amplitude * phase).toInt()
+            out[i * 2] = (value and 0xFF).toByte()
+            out[i * 2 + 1] = ((value shr 8) and 0xFF).toByte()
+        }
+        return out
+    }
+
+    // Adds a sine whose period is three samples (~5.3 kHz at 16 kHz), which the
+    // detector's 3-tap low-pass averages out exactly.
+    private fun addNoise(pcm: ByteArray, amplitude: Int, period: Int): ByteArray {
+        val out = ByteArray(pcm.size)
+        val samples = pcm.size / 2
+        for (i in 0..<samples) {
+            val low = pcm[i * 2].toInt() and 0xFF
+            val high = (pcm[i * 2 + 1].toInt() shl 8) or low
+            val noise = (amplitude * kotlin.math.sin(2.0 * kotlin.math.PI * (i % period) / period)).toInt()
+            val sum = (high + noise).coerceIn(-32767, 32767)
+            out[i * 2] = (sum and 0xFF).toByte()
+            out[i * 2 + 1] = ((sum shr 8) and 0xFF).toByte()
+        }
+        return out
+    }
+
     private fun pcmToFloats(pcm: ByteArray): FloatArray {
         val out = FloatArray(pcm.size / 2)
         for (i in 0..<out.size) {
@@ -56,7 +87,7 @@ class WakeWordDetectorTest {
 
     @Test
     fun extractWakeFeatures_matchesMfccOfTheSameSignal() {
-        val pcm = sinePcm(4000, 6000, 200)
+        val pcm = speechPcm(8000, 6000, 2000)
         val fromWav = extractWakeFeatures(convertPcmToWav(pcm, 16000))
         val direct = mfcc(pcmToFloats(pcm))
         assert(fromWav.size == direct.size) { "the WAV path and the direct path disagree on length" }
@@ -66,12 +97,26 @@ class WakeWordDetectorTest {
     }
 
     @Test
+    fun extractWakeFeatures_rejectsClipsWithoutSpeech() {
+        // A uniform sine has no quiet frame next to a voiced one, so it is room
+        // noise as far as the detector is concerned; an all-zero clip is silence.
+        // Both must produce no features, which is what stops the wake chat from
+        // firing on the silence between utterances.
+        assert(framesOf(extractWakeFeatures(convertPcmToWav(sinePcm(8000, 6000, 200), 16000))) == 0) {
+            "a clip with no speech-shaped gaps produced features"
+        }
+        assert(framesOf(extractWakeFeatures(convertPcmToWav(ByteArray(16000), 16000))) == 0) {
+            "a silent clip produced features"
+        }
+    }
+
+    @Test
     fun extractWakeFeatures_resamplesLowerSampleRates() {
         // The energy-saving mode records at 8 kHz; the detector works at 16 kHz,
         // so the half-rate clip must still yield the same frame count as the
         // 16 kHz recording of the same duration.
-        val atEightK = extractWakeFeatures(convertPcmToWav(sinePcm(8000, 8000, 160), 8000))
-        val atSixteenK = extractWakeFeatures(convertPcmToWav(sinePcm(16000, 8000, 320), 16000))
+        val atEightK = extractWakeFeatures(convertPcmToWav(speechPcm(8000, 8000, 1000), 8000))
+        val atSixteenK = extractWakeFeatures(convertPcmToWav(speechPcm(16000, 8000, 2000), 16000))
         assert(framesOf(atEightK) == framesOf(atSixteenK)) {
             "8 kHz audio was not resampled to the detector's frame grid"
         }
@@ -145,6 +190,23 @@ class WakeWordDetectorTest {
         assert(lenient < 10.0f) { "the fallback spread was not in normalised units" }
         assert(wakeCostThreshold(1.0f, emptyList()) >= 0.5f) {
             "no references produced a threshold below the minimum tolerance"
+        }
+    }
+
+    @Test
+    fun mfcc_ignoresBroadbandNoiseAboveThePhrase() {
+        // The low-pass is what lets a reference enrolled in one room match a
+        // clip heard later. A sine whose period is three samples (~5.3 kHz at
+        // 16 kHz) averages to exactly zero over the 3-tap window, so the noisy
+        // clip must still match its clean version far better than an unrelated
+        // phrase does.
+        val clean = speechPcm(8000, 7000, 2000)
+        val noisy = addNoise(clean, 3000, 3)
+        val unrelated = speechPcm(8000, 7000, 131)
+        val noiseCost = bestMatchCost(mfcc(pcmToFloats(noisy)), listOf(mfcc(pcmToFloats(clean))))
+        val unrelatedCost = bestMatchCost(mfcc(pcmToFloats(clean)), listOf(mfcc(pcmToFloats(unrelated))))
+        assert(noiseCost < unrelatedCost) {
+            "broadband noise was not filtered out: noise cost $noiseCost, unrelated cost $unrelatedCost"
         }
     }
 }
