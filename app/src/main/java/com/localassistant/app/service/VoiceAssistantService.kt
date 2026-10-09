@@ -97,8 +97,12 @@ class VoiceAssistantService : Service() {
         )
     }
     
-    // Coroutine scope for background tasks
-    private val serviceScope = CoroutineScope(Dispatchers.Default + Job())
+    // Coroutine scope for background tasks. cancel() permanently finishes a scope,
+    // so stopListening() replaces it with a fresh one before the next start.
+    @Volatile
+    private var serviceScope = newServiceScope()
+
+    private fun newServiceScope() = CoroutineScope(Dispatchers.Default + Job())
     
     // Audio recording
     private var audioRecord: AudioRecord? = null
@@ -233,6 +237,9 @@ class VoiceAssistantService : Service() {
     private fun startListening() {
         if (_state.value == STATE_IDLE) {
             _state.value = STATE_LISTENING
+            // A previous stopListening() cancelled the scope; resumeService()/the
+            // home-screen widget can start again without the service being recreated.
+            if (!serviceScope.isActive) serviceScope = newServiceScope()
             
             // Load VAD settings from repository before starting
             try {
@@ -243,10 +250,10 @@ class VoiceAssistantService : Service() {
                 android.util.Log.w("VoiceAssistantService", "Failed to load VAD settings, using defaults")
             }
             
-            // Validate and potentially adjust audio configuration for device compatibility
-            validateAudioConfiguration()
-            
             try {
+                // Validate and potentially adjust audio configuration for device compatibility
+                validateAudioConfiguration()
+
                 val bufferSize = AudioRecord.getMinBufferSize(
                     sampleRate, channelConfig, audioFormat
                 ) ?: throw RuntimeException("Cannot get min buffer size")
@@ -278,6 +285,11 @@ class VoiceAssistantService : Service() {
                     throw RuntimeException("Failed to initialize audio recorder")
                 }
             } catch (e: Exception) {
+                // The AudioRecord may already exist when a later step failed - native
+                // resources must be released or they stay alive until the process dies.
+                audioRecord?.stop()
+                audioRecord?.release()
+                audioRecord = null
                 _state.value = STATE_ERROR
                 handleError(e.message ?: "Audio initialization failed")
             }
@@ -301,8 +313,11 @@ class VoiceAssistantService : Service() {
             }
         }
         
-        // Cancel the coroutine scope to stop all background tasks
+        // Cancel the coroutine scope to stop all background tasks, then start a fresh
+        // one: a cancelled scope can never launch again, so the next startListening()
+        // would otherwise throw IllegalStateException.
         serviceScope.cancel()
+        serviceScope = newServiceScope()
         
         try {
             audioRecord?.stop()
@@ -341,9 +356,10 @@ class VoiceAssistantService : Service() {
         
         val network = connectivityManager.activeNetwork
         val capabilities = connectivityManager.getNetworkCapabilities(network)
-        
-        return capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true &&
-               capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+
+        // VALIDATED only says the stack probed the network (captive portal), not that
+        // requests can reach the local endpoints, so it must not gate an API call.
+        return capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
     }
 
     /**
@@ -355,13 +371,7 @@ class VoiceAssistantService : Service() {
             _state.value = STATE_ERROR
             updateNotification("⚠️ No network connection. Check your internet.")
             android.util.Log.w("VoiceAssistantService", "API call attempted but no network available")
-            serviceScope.launch {
-                delay(3000L)
-                if (_state.value == STATE_ERROR) {
-                    _state.value = STATE_IDLE
-                    updateNotification("Idle")
-                }
-            }
+            scheduleErrorRecovery()
             return false
         }
         return true
@@ -853,13 +863,22 @@ class VoiceAssistantService : Service() {
     private fun handleError(message: String) {
         _state.value = STATE_ERROR
         updateNotification("Error: $message")
-        
-        // Auto-recover after 3 seconds
+        scheduleErrorRecovery()
+    }
+
+    /**
+     * Schedule the recovery after an error. The audio loop ends the session on
+     * STATE_IDLE, so a live recording thread must go back to LISTENING - recovering
+     * to IDLE would leave the foreground service dead until the user restarts it.
+     */
+    private fun scheduleErrorRecovery() {
+        if (!serviceScope.isActive) return
         serviceScope.launch {
             delay(3000L)
             if (_state.value == STATE_ERROR) {
-                _state.value = STATE_IDLE
-                updateNotification("Idle")
+                val resume = recordingThread?.isAlive() == true
+                _state.value = if (resume) STATE_LISTENING else STATE_IDLE
+                updateNotification(if (resume) "Listening..." else "Idle")
             }
         }
     }
