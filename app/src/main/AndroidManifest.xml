@@ -76,13 +76,16 @@
             android:exported="false" />
 
         <!--
-            WAKE WORD DETECTION SERVICE (Alternative/Additional)
+            WAKE CHAT SERVICE
 
-            A lighter-weight service dedicated to wake word detection.
-            Can run independently or as part of VoiceAssistantService.
+            The hands-free service behind the wake-word overlay. It runs the whole
+            pipeline (record -> on-device wake-word match -> STT -> LLM -> TTS) in
+            the background, so the conversation keeps working while the app is
+            minimized. Its persistent notification carries the reply and reopens the
+            app when tapped.
         -->
         <service
-            android:name=".service.WakeWordDetectionService"
+            android:name=".service.WakeChatService"
             android:foregroundServiceType="microphone"
             android:exported="false" />
 

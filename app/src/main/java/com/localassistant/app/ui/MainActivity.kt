@@ -403,8 +403,9 @@ fun MainNavigation(hasPermissions: Boolean) {
  * The wake-word chat as an app-level layer.
  *
  * It lives outside the navigation graph and is drawn last, so the card overlays
- * whichever screen is open; the service itself starts from here because it must
- * run while the app is open, not only while the chat screen is.
+ * whichever screen is open. The service is started from here - not from the chat
+ * screen - because it is a foreground service that must keep listening even when
+ * the app is minimized; this layer only renders whatever the service is doing.
  */
 @Composable
 fun WakeOverlay(wakeEnabled: Boolean, hasPermissions: Boolean) {

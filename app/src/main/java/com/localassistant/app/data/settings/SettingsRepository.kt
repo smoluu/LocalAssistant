@@ -32,8 +32,11 @@ class SettingsRepository(private val context: Context) {
         const val DEFAULT_TTS_MODEL_NAME = "piper-en"
         const val DEFAULT_TTS_VOICE_NAME = "en_US-ryan-high"
         const val DEFAULT_TTS_RESPONSE_FORMAT = "mp3"
-        const val DEFAULT_SYSTEM_PROMPT = """You are a helpful, friendly voice assistant running locally on the user's device. 
-|Keep responses concise and conversational since they are spoken aloud."""
+        const val DEFAULT_SYSTEM_PROMPT = """You are LocalAssistant, running on the user's Android device.
+|Answer in one or two short sentences, in plain words that will be read aloud.
+|Give the answer directly: do not explain your reasoning, list steps, repeat the question or greet the user.
+|Never use markdown, bullet points, numbering or emoji.
+|If you are unsure or cannot help, say so honestly in one short sentence."""
         const val DEFAULT_WAKE_WORD_NAME = "hey assistant"
         const val DEFAULT_WAKE_WORD_SENSITIVITY = 0.5f
         const val DEFAULT_VAD_SENSITIVITY = 0.4f

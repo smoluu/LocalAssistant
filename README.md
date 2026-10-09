@@ -167,7 +167,7 @@ app/
 │   │       └── SettingsRepository.kt
 │   ├── service/                        # Foreground services
 │   │   ├── VoiceAssistantService.kt    # Main voice pipeline service
-│   │   └── WakeWordDetectionService.kt # Wake word detection
+│   │   └── WakeChatService.kt          # Hands-free wake-word service
 │   ├── ui/                             # Compose UI
 │   │   ├── MainActivity.kt             # Entry point & navigation
 │   │   ├── chat/                       # Chat screen components

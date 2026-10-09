@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.localassistant.app.data.settings.SettingsRepository
 
 // ==================== Helper Composables (defined first for forward reference) ====================
 
@@ -37,7 +38,13 @@ fun SettingsSection(title: String, icon: String, description: String, content: @
 }
 
 @Composable
-fun SettingTextField(label: String, value: String, onValueChange: (String) -> Unit, placeholder: String) {
+fun SettingTextField(
+    label: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    maxLines: Int = 2,
+) {
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         Text(text = label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 4.dp))
         OutlinedTextField(
@@ -45,7 +52,7 @@ fun SettingTextField(label: String, value: String, onValueChange: (String) -> Un
             value = value,
             onValueChange = onValueChange,
             placeholder = { Text(placeholder) },
-            maxLines = 2,
+            maxLines = maxLines,
             shape = RoundedCornerShape(8.dp)
         )
     }
@@ -206,6 +213,24 @@ fun SettingsScreen(onNavigateBack: () -> Unit, viewModel: SettingsViewModel = vi
                 EndpointChoices("Available models", llmModels, settings.llmModelName) { viewModel.updateSetting("llmModelName", it) }
                 SettingTextField("API Key (optional)", settings.llmApiKey, { viewModel.updateSetting("llmApiKey", it) }, "Leave empty if not required")
                 SettingSwitch("Auto-expand Reasoning", settings.autoExpandReasoning, { viewModel.updateSetting("autoExpandReasoning", it) })
+                SettingTextField(
+                    "System Prompt",
+                    settings.systemPrompt,
+                    { viewModel.updateSetting("systemPrompt", it) },
+                    "How the assistant should answer",
+                    maxLines = 6
+                )
+                Text(
+                    text = "The default asks for one or two spoken sentences without reasoning, which is what a small local model and the text-to-speech reply want. Edit it to change tone or verbosity; the wake chat uses it too.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Button(
+                    onClick = { viewModel.updateSetting("systemPrompt", SettingsRepository.DEFAULT_SYSTEM_PROMPT) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Restore default prompt")
+                }
                 TestButton("Test LLM", true, llmTesting) { viewModel.runEndpointTest("llm") }
             }
 
