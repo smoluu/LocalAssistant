@@ -186,6 +186,8 @@ class VoiceAssistantService : Service() {
     /**
      * Validate that the device supports the required audio configuration.
      * If not supported, log warnings and fall back to lower quality settings.
+     * Only mono PCM is negotiated - convertToWav and the STT endpoint both assume a
+     * single 16-bit channel, so a stereo stream would be transcribed from interleaved samples.
      */
     private fun validateAudioConfiguration() {
         val originalSampleRate = 16000
@@ -216,29 +218,8 @@ class VoiceAssistantService : Service() {
                     android.util.Log.w("VoiceAssistantService", "Falling back to 8kHz sample rate")
                 } else {
                     android.util.Log.e("VoiceAssistantService", "No supported sample rate found for mono PCM")
-                    // Try stereo as last resort with original sample rate
-                    minBufferSize = AudioRecord.getMinBufferSize(
-                        originalSampleRate, AudioFormat.CHANNEL_IN_STEREO, audioFormat
-                    )
-                    if (minBufferSize > 0) {
-                        channelConfig = AudioFormat.CHANNEL_IN_STEREO
-                        android.util.Log.w("VoiceAssistantService", "Falling back to stereo configuration")
-                    } else {
-                        throw RuntimeException("No supported audio configuration found")
-                    }
+                    throw RuntimeException("No supported audio configuration found")
                 }
-            }
-        }
-        
-        // Check if channel config is supported at preferred sample rate
-        if (sampleRate == originalSampleRate && channelConfig == AudioFormat.CHANNEL_IN_MONO) {
-            minBufferSize = AudioRecord.getMinBufferSize(
-                sampleRate, AudioFormat.CHANNEL_IN_STEREO, audioFormat
-            )
-            if (minBufferSize > 0) {
-                // Stereo works but mono didn't - this shouldn't happen, but handle gracefully
-                android.util.Log.w("VoiceAssistantService", "Mono not supported at ${sampleRate}Hz, using stereo")
-                channelConfig = AudioFormat.CHANNEL_IN_STEREO
             }
         }
     }
@@ -414,13 +395,15 @@ class VoiceAssistantService : Service() {
                 val readCount = audioRecord?.read(buffer, 0, buffer.size) ?: 0
                 
                 if (readCount > 0) {
-                    // Calculate RMS energy for VAD and audio level
-                    var sum = 0L
+                    // Mean-square energy, the same scale CommonUtilities.recordAudioWithVAD
+                    // uses - averaging absolute amplitudes would cap RMS at ~181 and never
+                    // reach the vadSensitivity threshold.
+                    var sumOfSquares = 0L
                     for (i in 0 until readCount) {
-                        val absVal = kotlin.math.abs(buffer[i].toInt())
-                        sum += absVal.toLong()
+                        val sample = buffer[i].toLong()
+                        sumOfSquares += sample * sample
                     }
-                    val rms = kotlin.math.sqrt(sum.toDouble() / readCount).toFloat()
+                    val rms = kotlin.math.sqrt(sumOfSquares.toDouble() / readCount).toFloat()
                     
                     // Convert RMS to 0-100% audio level indicator
                     val levelPercent = ((rms / Short.MAX_VALUE.toFloat()) * 100f).toInt().coerceIn(0, 100)
