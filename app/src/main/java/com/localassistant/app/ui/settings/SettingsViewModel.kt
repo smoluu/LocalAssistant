@@ -454,12 +454,18 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
                 _llmTesting.value = true
                 viewModelScope.launch {
                     try {
+                        // The test carries the configured generation controls,
+                        // because that is the only way it can see the request the
+                        // chats actually send: a plain request stays green while
+                        // every chat 400s.
                         val response = ApiClient.chatCompletion(
                             baseUrl = currentSettings.llmBaseUrl,
                             apiKey = if (currentSettings.llmApiKey.isBlank()) null else currentSettings.llmApiKey,
                             messages = listOf(mapOf("role" to "user", "content" to "Reply with just: ok")),
                             model = currentSettings.llmModelName,
-                            maxTokens = 256,
+                            maxTokens = currentSettings.llmMaxTokens,
+                            reasoningBudgetTokens = currentSettings.llmReasoningBudgetTokens,
+                            chatTemplateKwargs = currentSettings.llmChatTemplateKwargs,
                             stream = false
                         )
                         val reply = response.content.trim()
