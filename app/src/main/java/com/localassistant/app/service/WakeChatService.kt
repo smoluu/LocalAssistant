@@ -61,8 +61,8 @@ class WakeChatService : VoiceInteractionService() {
         // conversations can open this service without the app being involved.
         const val ACTION_VOICE_INTERACTION = "android.service.voice.VoiceInteractionService"
         // Closing an open chat from outside the app (the system, or a stale intent
-        // left in the queue). The app's own overlay closes it through closeChat()
-        // directly, since the UI and the service share this process.
+        // left in the queue). The app's own overlay closes it through the
+        // service's endExchange(), since the UI and the service share this process.
         const val ACTION_CLOSE_CHAT = "com.localassistant.CLOSE_WAKE_CHAT"
         // Runs one exchange without waiting for the wake phrase, so the pipeline
         // can be exercised from Settings.
@@ -188,7 +188,7 @@ class WakeChatService : VoiceInteractionService() {
             // "listen", and startListening() is idempotent so the two cannot stack.
             ACTION_START, ACTION_VOICE_INTERACTION -> startListening()
             ACTION_STOP -> stopListening()
-            ACTION_CLOSE_CHAT -> closeChat()
+            ACTION_CLOSE_CHAT -> endExchange()
             ACTION_TRIGGER_EXCHANGE -> triggerExchange()
         }
 
@@ -316,7 +316,7 @@ class WakeChatService : VoiceInteractionService() {
         stopSignal.set(true)
         // Stopping the service closes the chat, so its history goes with it -
         // a wake chat never carries a conversation into the next exchange.
-        closeChat()
+        endExchange()
         _phase.value = PHASE_IDLE
         serviceScope = newServiceScope()
     }
@@ -374,7 +374,7 @@ class WakeChatService : VoiceInteractionService() {
             if (!listening) break
             if (System.currentTimeMillis() - _lastActivity.value >= closeMs) break
         }
-        closeChat()
+        endExchange()
     }
 
     /**
@@ -499,6 +499,11 @@ class WakeChatService : VoiceInteractionService() {
         }
         _phase.value = PHASE_THINKING
         touchChat()
+        // The window is already up from the moment the phrase was heard, so the
+        // words the user said replace the "I'm listening" card as soon as they
+        // are known - the user can see what was heard while the answer is being
+        // produced.
+        requestSession(SESSION_STATE_REQUEST, request, "")
 
         val reply = complete(currentSettings, request)
         if (reply.isNotBlank()) {
@@ -564,6 +569,20 @@ class WakeChatService : VoiceInteractionService() {
             _statusMessage.value = "The system would not draw this exchange: ${e.message}"
             updateNotification("The system would not draw this exchange")
         }
+    }
+
+    /**
+     * End the open exchange everywhere: the app's overlay, and the window the
+     * system drew over whatever the device is showing.
+     *
+     * [closeChat] clears the state both halves share, but the session runs in
+     * another process and only sees the bundles it is handed, so the end of the
+     * exchange has to be sent to it as well - otherwise the card stays on the
+     * home screen after the chat has been closed.
+     */
+    fun endExchange() {
+        closeChat()
+        requestSession(SESSION_STATE_CLOSE, "", "")
     }
 
     /**

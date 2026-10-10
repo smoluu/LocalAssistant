@@ -55,9 +55,14 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
     /**
      * End the exchange and drop its history. The card is a single exchange, never
      * a running log: closing it clears the messages, so the next one starts empty.
+     *
+     * The close is sent to the service as an intent rather than called here,
+     * because the service has to tell the session it drew over the screen about
+     * the end of the exchange too, and that lives in the service, not in the
+     * companion object this renderer can reach.
      */
     fun closeChat() {
-        WakeChatService.closeChat()
+        send(WakeChatService.ACTION_CLOSE_CHAT)
     }
 
     private fun send(action: String) {
