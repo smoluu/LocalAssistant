@@ -116,4 +116,54 @@ class LlmSettingsTest {
             "a key that is not an identifier must never reach the request body"
         }
     }
+
+    @Test
+    fun generationControlsStayInsideTheObject() {
+        // The regression this guards: optional parameters were appended after the
+        // body's closing brace, so llama.cpp rejected every chat with
+        // 400 "parse error … unexpected ','; expected end of input".
+        val withArgs = ApiClient.buildChatRequestBody(
+            model = "qwen",
+            messages = listOf(mapOf("role" to "user", "content" to "hi")),
+            temperature = 0.7f,
+            maxTokens = 1024,
+            stream = true,
+            reasoningBudgetTokens = 512,
+            chatTemplateKwargs = "enable_thinking=false"
+        )
+        assert(withArgs.count { c -> c == '{' } == withArgs.count { c -> c == '}' }) {
+            "the braces must balance, or the server cannot parse the request"
+        }
+        assert(withArgs.trim().endsWith("}")) {
+            "the last character must close the request object"
+        }
+        assert(withArgs.contains("\"chat_template_kwargs\"") &&
+                withArgs.indexOf("\"chat_template_kwargs\"") < withArgs.lastIndexOf('}')) {
+            "chat-template arguments belong inside the object, never after it"
+        }
+        assert(withArgs.contains("\"reasoning_budget_tokens\"") &&
+                withArgs.indexOf("\"reasoning_budget_tokens\"") < withArgs.lastIndexOf('}')) {
+            "the reasoning budget belongs inside the object too"
+        }
+    }
+
+    @Test
+    fun aPlainRequestIsUnchanged() {
+        // Nothing configured must send exactly what older servers already accept -
+        // no empty chat_template_kwargs, no zero reasoning budget.
+        val plain = ApiClient.buildChatRequestBody(
+            model = "qwen",
+            messages = listOf(mapOf("role" to "user", "content" to "hi")),
+            temperature = 0.7f,
+            maxTokens = 1024,
+            stream = true
+        )
+        assert(!plain.contains("chat_template_kwargs") &&
+                !plain.contains("reasoning_budget")) {
+            "unset generation controls must not appear in the request"
+        }
+        assert(plain.count { c -> c == '{' } == plain.count { c -> c == '}' }) {
+            "a plain request must be one complete JSON object"
+        }
+    }
 }

@@ -87,27 +87,15 @@ object ApiClient {
         val requestMessages = if (systemPrompt.isBlank()) messages
         else listOf(mapOf("role" to "system", "content" to systemPrompt)) + messages
 
-        // Optional generation controls are appended only when the user set them,
-        // so a server that knows nothing about reasoning keeps receiving the plain
-        // request it accepted before.
-        val optionalParams = StringBuilder()
-        if (reasoningBudgetTokens > 0) {
-            optionalParams.append(",\"reasoning_budget_tokens\": $reasoningBudgetTokens")
-        }
-        buildChatTemplateKwargsJson(chatTemplateKwargs)?.let { kwargs ->
-            optionalParams.append(",\"chat_template_kwargs\": $kwargs")
-        }
-
-        val jsonBody = """{
-            "model": ${escapeJsonString(model)},
-            "messages": ${buildMessagesJson(requestMessages)},
-            "temperature": $temperature,
-            "max_tokens": $maxTokens,
-            "stream": $stream
-        }$optionalParams""".trimIndent()
-        
-        val requestBody = jsonBody.toRequestBody("application/json".toMediaType())
-        
+        val requestBody = buildChatRequestBody(
+            model = model,
+            messages = requestMessages,
+            temperature = temperature,
+            maxTokens = maxTokens,
+            stream = stream,
+            reasoningBudgetTokens = reasoningBudgetTokens,
+            chatTemplateKwargs = chatTemplateKwargs
+        ).toRequestBody("application/json".toMediaType())
         val request = Request.Builder()
             .url("$cleanUrl/chat/completions")
             .post(requestBody)
@@ -324,6 +312,44 @@ object ApiClient {
             """{"role": "${msg["role"]}", "content": ${escapeJsonString(msg["content"] ?: "")}}"""
         }
         return "[$jsonList]"
+    }
+
+    /**
+     * Assemble the chat request body, including the optional generation controls
+     * the user configured.
+     *
+     * The optional parameters belong before the closing brace, never after it: a
+     * body ending `…},"chat_template_kwargs": {…}` is a complete JSON value
+     * followed by junk, and llama.cpp answers that whole request with
+     * 400 "parse error … unexpected ','; expected end of input" - which is why
+     * the settings test (a plain request) said "ok" while every chat failed.
+     */
+    fun buildChatRequestBody(
+        model: String,
+        messages: List<Map<String, String>>,
+        temperature: Float,
+        maxTokens: Int,
+        stream: Boolean,
+        reasoningBudgetTokens: Int = 0,
+        chatTemplateKwargs: String = ""
+    ): String {
+        val body = StringBuilder()
+        body.append("{\n\"model\": ${escapeJsonString(model)},")
+        body.append("\n\"messages\": ${buildMessagesJson(messages)},")
+        body.append("\n\"temperature\": $temperature,")
+        body.append("\n\"max_tokens\": $maxTokens,")
+        body.append("\n\"stream\": $stream")
+        // Optional generation controls are appended only when the user set them,
+        // so a server that knows nothing about reasoning keeps receiving the plain
+        // request it accepted before.
+        if (reasoningBudgetTokens > 0) {
+            body.append(",\n\"reasoning_budget_tokens\": $reasoningBudgetTokens")
+        }
+        buildChatTemplateKwargsJson(chatTemplateKwargs)?.let { kwargs ->
+            body.append(",\n\"chat_template_kwargs\": $kwargs")
+        }
+        body.append("\n}")
+        return body.toString()
     }
 
     /**
