@@ -146,7 +146,14 @@ class WakeChatService : VoiceInteractionService() {
         return START_STICKY
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    // onBind() is deliberately NOT overridden. The base implementation answers the
+    // interface action ("android.service.voice.VoiceInteractionService") with that
+    // intent's binder, and that binder is the IPC channel the system server uses to
+    // call onReady(), onPrepareToShowSession() and onShowSessionFailed() in this
+    // process. An override that returns null for every intent keeps the system's
+    // voice interaction manager unresolved - onReady() is its only assignment and
+    // showSession() throws until it exists - so no exchange is ever drawn outside
+    // the app's own window.
 
     // ==================== Voice interaction (system-driven path) ====================
     //

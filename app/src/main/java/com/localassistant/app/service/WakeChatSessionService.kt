@@ -56,13 +56,24 @@ private const val PRIMARY = 0xFFF2A94C.toInt()
 class WakeChatSessionService : VoiceInteractionSessionService() {
 
     /**
-     * Create the session that will show the exchange. The text itself is not
-     * available yet - it arrives in [onPrepareShow] - so the session is built
-     * around a context the widgets can be measured against.
+     * Create the session that will show the exchange.
+     *
+     * The session is built around this service as its context, and that is the
+     * only context that can work here. [VoiceInteractionSession] starts by asking
+     * the context for a window context of type TYPE_VOICE_INTERACTION
+     * (createWindowContextIfNeeded), and it does that only when the context is
+     * NOT a UI context: an android.app.Activity is annotated @UiContext, so
+     * handing one over skips that step entirely and the session's window is
+     * attached to a surface that belongs to nothing, which is why the exchange
+     * never appears over the home screen or another app. A Service is a
+     * ContextWrapper - hence a Context - whose base is null, so it reports
+     * isUiContext() false and can answer getSystemService(DisplayManager),
+     * which is exactly what the window context needs. AOSP hands this same
+     * object to HandlerCaller in onCreate() for the same reason.
      */
     override fun onNewSession(args: android.os.Bundle): VoiceInteractionSession {
         Log.i("WakeChatSessionService", "The system asked for a session: $args")
-        return WakeChatSession(android.app.Activity())
+        return WakeChatSession(this)
     }
 }
 
@@ -72,8 +83,16 @@ class WakeChatSessionService : VoiceInteractionSessionService() {
  * The session is created before the system knows what the user said, so the
  * request and the reply are captured in [onPrepareShow] and only turned into
  * views in [onCreateContentView], which the framework calls afterwards.
+ *
+ * The context is the session service itself, never an [android.app.Activity]:
+ * Activity is annotated @UiContext, which makes
+ * [VoiceInteractionSession.createWindowContextIfNeeded][VoiceInteractionSession]
+ * keep the context as it is and attach the session window to a surface that
+ * belongs to nothing. A Service is a ContextWrapper with no base, so it reports
+ * isUiContext() false and the session gets a real TYPE_VOICE_INTERACTION window
+ * context from the DisplayManager, which is the surface drawn over every app.
  */
-private class WakeChatSession(private val context: android.app.Activity) : VoiceInteractionSession(context) {
+private class WakeChatSession(private val context: android.app.Service) : VoiceInteractionSession(context) {
 
     private var request = ""
     private var reply = ""
