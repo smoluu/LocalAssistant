@@ -19,10 +19,14 @@ import android.content.Intent
  * `ROLE_MICROPHONE`-style capabilities - and `ROLE_ASSISTANT` is the role the
  * voice-interaction service makes the app eligible for. Older platforms have no
  * such role, so every entry point here answers "unknown" rather than guessing,
- * and the settings page is opened through its documented fallback key.
+ * and the settings page is reached through its documented activity keys instead.
  */
 
-private const val assistantSettingsKey = "android.settings.voice_input"
+// The values of android.content.Intent.Settings.ACTION_VOICE_INPUT_SETTINGS and
+// ACTION_MANAGE_DEFAULT_APPS_SETTINGS. That nested class is unreachable from this
+// Kotlin toolchain, so the platform's own action strings are spelled out here.
+private const val voiceInputSettingsAction = "android.settings.VOICE_INPUT_SETTINGS"
+private const val defaultAppsSettingsAction = "android.settings.MANAGE_DEFAULT_APPS_SETTINGS"
 
 /**
  * Whether the platform has bound this app as its default digital assistant.
@@ -42,12 +46,19 @@ fun isDefaultAssistantHeld(context: Context): Boolean? {
  *
  * Prefers the role request - it is the platform's own way of taking the user to
  * the picker for the role this app is eligible for - and falls back to the
- * documented settings key for platforms where the role API is absent.
+ * documented settings keys for platforms where the role API is absent.
+ *
+ * The keys are listed in the order the platform resolves them: the assistant page
+ * itself first, the list of every default-app picker second. Callers try each in
+ * turn because a vendor build may register only one of them.
  */
-fun assistantSettingsIntent(context: Context): Intent {
+fun assistantSettingsIntents(context: Context): List<Intent> {
     val roleManager = context.getSystemService(RoleManager::class.java)
     if (roleManager != null && roleManager.isRoleAvailable(RoleManager.ROLE_ASSISTANT)) {
-        return roleManager.createRequestRoleIntent(RoleManager.ROLE_ASSISTANT)
+        return listOf(roleManager.createRequestRoleIntent(RoleManager.ROLE_ASSISTANT))
     }
-    return Intent(assistantSettingsKey)
+    return listOf(
+        Intent(voiceInputSettingsAction),
+        Intent(defaultAppsSettingsAction),
+    )
 }

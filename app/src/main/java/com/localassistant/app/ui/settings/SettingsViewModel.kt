@@ -17,7 +17,7 @@ import com.localassistant.app.ui.common.recordAudioWithVAD
 import com.localassistant.app.ui.common.referenceFrameCount
 import com.localassistant.app.ui.common.saveWakeReference
 import com.localassistant.app.ui.common.wakeCostThreshold
-import com.localassistant.app.ui.common.assistantSettingsIntent
+import com.localassistant.app.ui.common.assistantSettingsIntents
 import com.localassistant.app.ui.common.isDefaultAssistantHeld
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -273,18 +273,28 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     /**
      * Opens the platform's page for choosing the default digital assistant.
      *
-     * The role request is the platform's own way of getting there; where the role
-     * API is absent the documented settings key is used instead.
+     * The candidates are tried in order because a vendor build may register only
+     * one of them; the first one the platform resolves is the one launched. The
+     * role is held only after the user finishes choosing on that page, so the
+     * status is re-read here to pick up whatever they had already set.
      */
     fun openAssistantSettings() {
-        val intent = assistantSettingsIntent(appContext)
-        try {
-            appContext.startActivity(intent)
-            // The role is held only after the user finishes choosing on that page,
-            // so the status is re-read the next time the screen is opened.
-            refreshAssistantRole()
-        } catch (e: Exception) {
-            android.util.Log.w("LocalAssistant", "openAssistantSettings: ${intent.action} - ${e.message}")
+        val intents = assistantSettingsIntents(appContext)
+        var lastFailure: Exception? = null
+        for (intent in intents) {
+            try {
+                appContext.startActivity(intent)
+                refreshAssistantRole()
+                return
+            } catch (e: Exception) {
+                lastFailure = e
+            }
+        }
+        lastFailure?.let {
+            android.util.Log.w(
+                "LocalAssistant",
+                "openAssistantSettings: none of ${intents.map { i -> i.action }} resolved - ${it.message}",
+            )
         }
     }
 
