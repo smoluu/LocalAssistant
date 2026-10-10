@@ -23,6 +23,10 @@
     supportsLocalInteraction is what the platform needs to know to host the
     exchange on the device itself rather than remotely, which is the whole point
     of a local-first assistant.
+
+    supportsLaunchVoiceAssistFromKeyguard defaults to false in the parser too, so
+    it has to be stated for the assistant to be reachable from the lock screen -
+    the one place the exchange is drawn where none of this app's own windows exist.
 -->
 <voice-interaction-service
     xmlns:android="http://schemas.android.com/apk/res/android"
@@ -30,4 +34,5 @@
     android:recognitionService="com.localassistant.app.service.WakeChatRecognitionService"
     android:settingsActivity="com.localassistant.app.ui.MainActivity"
     android:supportsAssist="true"
+    android:supportsLaunchVoiceAssistFromKeyguard="true"
     android:supportsLocalInteraction="true" />

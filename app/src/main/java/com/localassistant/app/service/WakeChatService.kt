@@ -163,6 +163,14 @@ class WakeChatService : VoiceInteractionService() {
     // session request below depends on it having resolved.
 
     override fun onReady() {
+        // The base resolves the system's voice interaction manager here - it is the
+        // only assignment of it, and every session request below goes through
+        // showSession(), which throws "Not available until onReady() is called"
+        // until that resolution has happened. So this call must come first and must
+        // not be skipped: an override that never chains to it leaves the whole
+        // system-driven path dead even on a platform that has bound this app as its
+        // assistant.
+        super.onReady()
         android.util.Log.i(
             "WakeChatService",
             "onReady: the system has bound this app as its voice interaction service"
@@ -398,7 +406,13 @@ class WakeChatService : VoiceInteractionService() {
             android.util.Log.i("WakeChatService", "Asking the system to draw this exchange")
             showSession(args, 0)
         } catch (e: Exception) {
-            android.util.Log.w("WakeChatService", "Session request failed: ${e.message}")
+            // The reason is surfaced in the notification rather than only logged:
+            // Kotlin's log never reaches logcat here, and the refusal is the one
+            // thing the user can read to tell whether the platform hosts the
+            // exchange at all (a session that failed to bind reports through
+            // onShowSessionFailed instead, and never reaches this catch).
+            _statusMessage.value = "The system would not draw this exchange: ${e.message}"
+            updateNotification("The system would not draw this exchange")
         }
     }
 
