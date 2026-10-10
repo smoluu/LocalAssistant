@@ -1,6 +1,7 @@
 package com.localassistant.app.service
 
 import android.app.Activity
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.service.voice.VoiceInteractionSession
 import android.service.voice.VoiceInteractionSessionService
@@ -89,8 +90,11 @@ private const val REPLY_BUBBLE = 0xFF342A1F.toInt()
  * unreachable, `View.setFillDimensions` does not exist, and a forced minimum
  * (`setMinimumWidth`/`setMinimumHeight`) is not honoured by the window's measure
  * pass - forcing one left the card in the window's top-left corner, which is what
- * the user reported. The width therefore comes from the wrapped text plus the
- * card's own padding, which is the one sizing API the measure pass does honour.
+ * the user reported. The width therefore comes from padding, which is the sizing
+ * API the measure pass does honour: a `ruler` child of the card carries
+ * [CARD_WIDTH] as left-plus-right padding and nothing else, so it measures to
+ * exactly that width, contributes no height, and pins the card to it whatever
+ * the text inside it happens to be.
  *
  * [CARD_WIDTH] is a fixed pixel width rather than a fraction of the screen, and
  * that is what makes the card the same size in landscape and portrait: it is
@@ -103,6 +107,31 @@ private const val CARD_SIDE_PADDING = 40
 private const val CARD_TOP_PADDING = 28
 private const val CARD_BOTTOM_PADDING = 28
 private const val BUBBLE_PADDING = 24
+
+/**
+ * How rounded the card and the bubbles inside it are.
+ *
+ * A flat `setBackgroundColor(Int)` paints a sharp rectangle, which is what the
+ * user saw as "the message boxes are sharp squares". The rounded route that
+ * resolves here is [GradientDrawable]: it constructs with no arguments, takes
+ * [GradientDrawable.setColor][setColor] and a **Float**
+ * [GradientDrawable.setCornerRadius][setCornerRadius] (the Int spelling is
+ * rejected with "Argument type mismatch: actual type is 'Int', but 'Float' was
+ * expected"), and a `View` accepts it through `setBackgroundDrawable`/`background`
+ * - the same setters that are unresolved on a [VoiceInteractionSession] itself
+ * work on the widgets inside it, which is why the card can be rounded while the
+ * platform's own panel behind it cannot be touched.
+ */
+private const val CARD_RADIUS = 28f
+private const val BUBBLE_RADIUS = 20f
+
+/**
+ * The gap between the two bubbles inside the card.
+ *
+ * It is padding on the user bubble rather than a spacer child, because the card
+ * builds its children once and the structure cannot grow between shows.
+ */
+private const val BUBBLE_GAP = 20
 
 /**
  * How much text the card can show.
@@ -246,6 +275,24 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
     private val riser = LinearLayout(context)
 
     /**
+     * The child that pins the card to [CARD_WIDTH], and the shapes that round it.
+     *
+     * The ruler is an empty child carrying [CARD_WIDTH] as left-plus-right
+     * padding: it measures to that width and to no height, so the card is as
+     * wide as it is whatever the text inside it happens to be - without it the
+     * card measures to its widest line and jumps wider every time a longer
+     * sentence is shown.
+     *
+     * The shapes are built once because the views are built once; [paint] only
+     * ever swaps which shape a widget carries.
+     */
+    private val ruler = LinearLayout(context)
+    private val cardShape = rounded(SURFACE, CARD_RADIUS)
+    private val clearShape = rounded(TRANSPARENT, CARD_RADIUS)
+    private val userShape = rounded(USER_BUBBLE, BUBBLE_RADIUS)
+    private val replyShape = rounded(REPLY_BUBBLE, BUBBLE_RADIUS)
+
+    /**
      * Records what the platform is about to show.
      *
      * AOSP calls this before it asks for the content view, so the text has to be
@@ -288,13 +335,15 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
         stage.addView(riser)
         card.setGravity(Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
         card.setPadding(CARD_SIDE_PADDING, CARD_TOP_PADDING, CARD_SIDE_PADDING, CARD_BOTTOM_PADDING)
+        card.addView(ruler)
+        ruler.setPadding(CARD_WIDTH / 2, 0, CARD_WIDTH / 2, 0)
         card.addView(notice)
         notice.setGravity(Gravity.CENTER)
         notice.textSize = TEXT_SIZE
         notice.setTextColor(MUTED)
         card.addView(userBubble)
         userBubble.setGravity(Gravity.CENTER)
-        userBubble.setPadding(BUBBLE_PADDING, BUBBLE_PADDING, BUBBLE_PADDING, BUBBLE_PADDING)
+        userBubble.setPadding(BUBBLE_PADDING, BUBBLE_PADDING, BUBBLE_PADDING, BUBBLE_PADDING + BUBBLE_GAP)
         userLines.forEach { line ->
             userBubble.addView(line)
             line.setGravity(Gravity.CENTER)
@@ -325,9 +374,9 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
         notice.text = ""
         userLines.forEach { line -> line.text = "" }
         replyLines.forEach { line -> line.text = "" }
-        card.setBackgroundColor(if (state == SESSION_STATE_CLOSE) TRANSPARENT else SURFACE)
-        userBubble.setBackgroundColor(if (request.isBlank()) TRANSPARENT else USER_BUBBLE)
-        replyBubble.setBackgroundColor(if (reply.isBlank()) TRANSPARENT else REPLY_BUBBLE)
+        card.background = if (state == SESSION_STATE_CLOSE) clearShape else cardShape
+        userBubble.background = if (request.isBlank()) clearShape else userShape
+        replyBubble.background = if (reply.isBlank()) clearShape else replyShape
         if (state == SESSION_STATE_LISTENING) notice.text = SESSION_LISTENING_TEXT
         wrap(request).forEachIndexed { index, line ->
             if (index < userLines.size) userLines[index].text = line
@@ -349,6 +398,25 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
         if (state == SESSION_STATE_CLOSE) return 0
         if (riseFrame >= RISE_FRAMES) return RESTING_GAP
         return RISE_START - RISE_STEP * riseFrame
+    }
+
+    /**
+     * A filled, rounded rectangle - the shape of the card and of a bubble.
+     *
+     * This is the only rounding available to a session: a widget's
+     * `setBackgroundColor(Int)` paints a sharp rectangle, while
+     * [GradientDrawable] is a concrete drawable that constructs with no arguments
+     * and takes a solid [GradientDrawable.setColor][setColor] plus a Float
+     * [GradientDrawable.setCornerRadius][setCornerRadius]. A single colour with
+     * no colour array set fills solid rather than gradient, and a fully
+     * transparent colour paints nothing, which is how a turn that has no text
+     * yet contributes no ink.
+     */
+    private fun rounded(color: Int, radius: Float): GradientDrawable {
+        val shape = GradientDrawable()
+        shape.setColor(color)
+        shape.setCornerRadius(radius)
+        return shape
     }
 
     /**
