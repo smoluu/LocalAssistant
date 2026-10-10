@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.service.voice.VoiceInteractionSession
 import android.service.voice.VoiceInteractionSessionService
 import android.util.Log
+import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -54,8 +55,15 @@ const val SESSION_STATE_REPLY = "reply"
  */
 const val SESSION_STATE_CLOSE = "close"
 
-/** The card text the platform shows while it waits for the request. */
-const val SESSION_LISTENING_TEXT = "Heard it - go ahead, I'm listening"
+/**
+ * The card text the platform shows while it waits for the request.
+ *
+ * It stays within [LINE_CHARS] because a legacy `TextView` never wraps: an
+ * unwrapped sentence is one line and the card measures to its widest child, so a
+ * long notice stretches the whole card across the screen instead of leaving it a
+ * small chat card.
+ */
+const val SESSION_LISTENING_TEXT = "Go ahead, I'm listening"
 
 /**
  * The card colours, matching the app's Gruvbox dark scheme. A session is drawn
@@ -72,21 +80,6 @@ private const val REPLY_TEXT = 0xFFF2A94C.toInt()
 private const val USER_BUBBLE = 0xFF3A3A3A.toInt()
 
 private const val REPLY_BUBBLE = 0xFF342A1F.toInt()
-
-/**
- * Where the card sits inside the stage.
- *
- * These are [android.ui.Gravity]'s BOTTOM (0x2) combined with its CENTER_HORIZONTAL
- * (0x1). The package itself is not reachable from this Kotlin toolchain -
- * `android.ui` is unresolved - so the bits are spelled out here rather than named.
- * CENTER_VERTICAL (0x20) is deliberately not set: the stage is as tall as its
- * content, so vertical placement inside it is decided by the riser under the card
- * instead.
- */
-private const val BOTTOM_CENTER_GRAVITY = 0x2 or 0x1
-
-/** The bits that centre text inside a bubble - CENTER_HORIZONTAL and CENTER_VERTICAL. */
-private const val CENTER_GRAVITY = 0x1 or 0x20
 
 /**
  * How big the card is.
@@ -290,30 +283,30 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
             "WakeChatSessionService",
             "Wiring the card for state=$state, a ${request.length}-character request and a ${reply.length}-character reply"
         )
-        stage.setGravity(BOTTOM_CENTER_GRAVITY)
+        stage.setGravity(Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
         stage.addView(card)
         stage.addView(riser)
-        card.setGravity(BOTTOM_CENTER_GRAVITY)
+        card.setGravity(Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
         card.setPadding(CARD_SIDE_PADDING, CARD_TOP_PADDING, CARD_SIDE_PADDING, CARD_BOTTOM_PADDING)
         card.addView(notice)
-        notice.setGravity(CENTER_GRAVITY)
+        notice.setGravity(Gravity.CENTER)
         notice.textSize = TEXT_SIZE
         notice.setTextColor(MUTED)
         card.addView(userBubble)
-        userBubble.setGravity(CENTER_GRAVITY)
+        userBubble.setGravity(Gravity.CENTER)
         userBubble.setPadding(BUBBLE_PADDING, BUBBLE_PADDING, BUBBLE_PADDING, BUBBLE_PADDING)
         userLines.forEach { line ->
             userBubble.addView(line)
-            line.setGravity(CENTER_GRAVITY)
+            line.setGravity(Gravity.CENTER)
             line.textSize = TEXT_SIZE
             line.setTextColor(MUTED)
         }
         card.addView(replyBubble)
-        replyBubble.setGravity(CENTER_GRAVITY)
+        replyBubble.setGravity(Gravity.CENTER)
         replyBubble.setPadding(BUBBLE_PADDING, BUBBLE_PADDING, BUBBLE_PADDING, BUBBLE_PADDING)
         replyLines.forEach { line ->
             replyBubble.addView(line)
-            line.setGravity(CENTER_GRAVITY)
+            line.setGravity(Gravity.CENTER)
             line.textSize = TEXT_SIZE
             line.setTextColor(REPLY_TEXT)
         }
