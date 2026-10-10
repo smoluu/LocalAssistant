@@ -24,6 +24,19 @@ const val SESSION_REQUEST_KEY = "request"
 const val SESSION_REPLY_KEY = "reply"
 
 /**
+ * The key the wake service uses to say which half of the exchange the user is in.
+ * The window is raised the moment the wake phrase is matched, before any words
+ * exist, so a session has to be able to render an exchange that has no text yet.
+ */
+const val SESSION_STATE_KEY = "state"
+
+/** The phrase was heard; the app is waiting for the request. */
+const val SESSION_STATE_LISTENING = "listening"
+
+/** The request and the reply are both known. */
+const val SESSION_STATE_REPLY = "reply"
+
+/**
  * The card colours, matching the app's Gruvbox dark scheme. A session is drawn
  * by the system, so it cannot read [Theme] and has to name them itself.
  */
@@ -32,6 +45,22 @@ private const val SURFACE = 0xFF2B2B2B.toInt()
 private const val MUTED = 0xFFAAAAAA.toInt()
 
 private const val PRIMARY = 0xFFF2A94C.toInt()
+
+private const val ON_PRIMARY = 0xFF1B1B12.toInt()
+
+private const val USER_BUBBLE = 0xFF3A3A3A.toInt()
+
+private const val REPLY_BUBBLE = 0xFF342A1F.toInt()
+
+/**
+ * Where the card sits inside the window the system gives a session.
+ *
+ * This is [android.ui.Gravity]'s BOTTOM (0x2) combined with its MIDDLE (0x20),
+ * which centres horizontally. The package itself is not reachable from this
+ * Kotlin toolchain - `android.ui` is unresolved - so the bits are spelled out
+ * here rather than named.
+ */
+private const val BOTTOM_CENTER_GRAVITY = 0x2 or 0x20
 
 /**
  * The session half of the wake pipeline.
@@ -94,6 +123,7 @@ class WakeChatSessionService : VoiceInteractionSessionService() {
  */
 private class WakeChatSession(private val context: android.app.Service) : VoiceInteractionSession(context) {
 
+    private var state = ""
     private var request = ""
     private var reply = ""
 
@@ -103,42 +133,69 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
      * than read where the views are built.
      */
     override fun onPrepareShow(args: android.os.Bundle, showFlags: Int) {
+        state = args.getString(SESSION_STATE_KEY) ?: ""
         request = args.getString(SESSION_REQUEST_KEY) ?: ""
         reply = args.getString(SESSION_REPLY_KEY) ?: ""
     }
 
     /**
-     * Build the card the system will draw over the screen: the request the user
-     * spoke, then the reply, in the app's Gruvbox colours.
+     * Build the card the system will draw over the screen.
+     *
+     * The root is deliberately left unpainted and bottom-centred: the system
+     * stretches a session's content view over the whole window it owns, so a
+     * background here would cover every pixel and hide whatever the device is
+     * showing - the complaint the user sees as "it's fullscreen". Only the card
+     * itself is painted, which is what makes the exchange look like the chat
+     * inside the app: a small card at the bottom with one bubble per turn.
      */
     override fun onCreateContentView(): View {
         Log.i(
             "WakeChatSessionService",
-            "Building the card for a ${request.length}-character request and a ${reply.length}-character reply"
+            "Building the card for state=$state, a ${request.length}-character request and a ${reply.length}-character reply"
         )
-        val card = LinearLayout(context)
-        card.setPadding(24, 20, 24, 20)
-        card.setBackgroundColor(SURFACE)
-        if (request.isNotBlank()) {
-            card.addView(requestLine(request))
-        }
-        card.addView(replyLine(reply))
-        return card
+        val stage = LinearLayout(context)
+        stage.setGravity(BOTTOM_CENTER_GRAVITY)
+        val turns = mutableListOf<LinearLayout>()
+        if (request.isNotBlank()) turns.add(bubble(request, USER_BUBBLE, MUTED))
+        if (reply.isNotBlank()) turns.add(bubble(reply, REPLY_BUBBLE, PRIMARY))
+        stage.addView(
+            if (turns.isEmpty()) {
+                card(listOf(line("Heard it - go ahead, I'm listening", MUTED, 19f)))
+            } else {
+                card(turns)
+            }
+        )
+        return stage
     }
 
-    private fun requestLine(text: String): TextView {
-        val line = TextView(context)
-        line.setText(text)
-        line.setTextColor(MUTED)
-        line.textSize = 17f
-        return line
+    /**
+     * A card is the small panel the exchange lives in: Gruvbox surface, generous
+     * padding, and the bubbles stacked inside it.
+     */
+    private fun card(children: Iterable<View>): LinearLayout {
+        val panel = LinearLayout(context)
+        panel.setPadding(20, 16, 20, 16)
+        panel.setBackgroundColor(SURFACE)
+        children.forEach { child -> panel.addView(child) }
+        return panel
     }
 
-    private fun replyLine(text: String): TextView {
+    /**
+     * One turn of the exchange as a bubble, the same shape the in-app card draws.
+     */
+    private fun bubble(text: String, background: Int, textColour: Int): LinearLayout {
+        val panel = LinearLayout(context)
+        panel.setPadding(14, 10, 14, 10)
+        panel.setBackgroundColor(background)
+        panel.addView(line(text, textColour, 19f))
+        return panel
+    }
+
+    private fun line(text: String, color: Int, size: Float): TextView {
         val line = TextView(context)
         line.setText(text)
-        line.setTextColor(PRIMARY)
-        line.textSize = 21f
+        line.setTextColor(color)
+        line.textSize = size
         return line
     }
 
@@ -148,6 +205,7 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
      * exchange must be dropped when the session is torn down.
      */
     override fun onDestroy() {
+        state = ""
         request = ""
         reply = ""
     }

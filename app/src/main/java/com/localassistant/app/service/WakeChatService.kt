@@ -438,6 +438,11 @@ class WakeChatService : VoiceInteractionService() {
             _phase.value = PHASE_LISTENING
             updateNotification(getPhaseText(PHASE_LISTENING))
             playWakeCue()
+            // The window is raised the moment the phrase is heard, before the
+            // request is recorded. A session that only appears once the reply is
+            // ready tells the user nothing about the exchange they are in - they
+            // would be speaking into a screen that shows nothing.
+            requestSession(SESSION_STATE_LISTENING, "", "")
 
             // The reply window is the user's setting: enough time to say the
             // request, and nothing heard within it ends the exchange instead of
@@ -506,7 +511,7 @@ class WakeChatService : VoiceInteractionService() {
             // Ask the system to draw the exchange over whatever the device is
             // showing, before the reply is spoken - the user can read it while
             // they listen.
-            requestSession(request, reply)
+            requestSession(SESSION_STATE_REPLY, request, reply)
             _phase.value = PHASE_SPEAKING
             // Speaking the reply is activity right up to its last syllable, so
             // the close clock is stamped before it starts and the hold below
@@ -535,13 +540,17 @@ class WakeChatService : VoiceInteractionService() {
      *
      * The session is drawn by [WakeChatSessionService] in its own process, so it
      * cannot read this service's state and the text has to be handed over in the
-     * bundle. The platform only accepts a request once [onReady] has finished,
-     * and a platform may refuse sessions altogether, so a failure here is logged
-     * and the exchange still reaches the user through the notification and TTS.
+     * bundle. [state] says which half of the exchange the user is in - the
+     * window is raised as soon as the phrase is heard, before any words exist,
+     * and shown again once the reply is ready. The platform only accepts a
+     * request once [onReady] has finished, and a platform may refuse sessions
+     * altogether, so a failure here is logged and the exchange still reaches the
+     * user through the notification and TTS.
      */
-    private fun requestSession(request: String, reply: String) {
+    private fun requestSession(state: String, request: String, reply: String) {
         try {
             val args = android.os.Bundle()
+            args.putString(SESSION_STATE_KEY, state)
             args.putString(SESSION_REQUEST_KEY, request)
             args.putString(SESSION_REPLY_KEY, reply)
             android.util.Log.i("WakeChatService", "Asking the system to draw this exchange")

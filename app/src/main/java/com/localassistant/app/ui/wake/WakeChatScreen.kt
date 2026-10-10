@@ -30,8 +30,12 @@ import com.localassistant.app.ui.wake.WakeChatViewModel
  * the exchange ends.
  *
  * The card is also the control surface for the exchange's lifetime: touching any
- * part of it restamps the service's close clock, and tapping the area above it -
- * off the chat - ends the exchange and drops its history.
+ * part of it restamps the service's close clock, and tapping the mic in its
+ * header ends the exchange and drops its history.
+ *
+ * Nothing outside the card may take a hit test. This layer is drawn over the
+ * whole app surface, so an invisible click-off region above the card would sit
+ * on top of every screen and swallow every tap the user makes in the app.
  */
 @Composable
 fun WakeChatScreen(viewModel: WakeChatViewModel = viewModel()) {
@@ -41,14 +45,9 @@ fun WakeChatScreen(viewModel: WakeChatViewModel = viewModel()) {
     val statusMessage by viewModel.statusMessage.collectAsState()
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // Everything above the card is "off the chat": a tap there unfocuses the
-        // exchange, so the service clears it and the next one starts with no history.
-        Box(
-            modifier = Modifier.fillMaxWidth().weight(1f).clickable(
-                onClickLabel = "Close the wake chat",
-                onClick = { viewModel.closeChat() }
-            )
-        ) {}
+        // Pushes the card to the bottom of whichever screen is open. It carries no
+        // interaction at all, so taps here reach the app underneath.
+        Box(modifier = Modifier.fillMaxWidth().weight(1f)) {}
 
         AnimatedVisibility(
             visible = overlay,
@@ -76,15 +75,24 @@ fun WakeChatScreen(viewModel: WakeChatViewModel = viewModel()) {
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                imageVector = if (phase == "detecting") {
-                                    androidx.compose.material.icons.Icons.Filled.Mic
-                                } else {
-                                    androidx.compose.material.icons.Icons.Filled.MicOff
-                                },
-                                contentDescription = "Wake word",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(20.dp)
+                            Box(
+                                modifier = Modifier.size(44.dp).clickable(
+                                    onClickLabel = "Close the wake chat",
+                                    onClick = { viewModel.closeChat() }
+                                ),
+                                contentAlignment = Alignment.Center,
+                                content = {
+                                    Icon(
+                                        imageVector = if (phase == "detecting") {
+                                            androidx.compose.material.icons.Icons.Filled.Mic
+                                        } else {
+                                            androidx.compose.material.icons.Icons.Filled.MicOff
+                                        },
+                                        contentDescription = "Wake word",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
                             )
                             Spacer(modifier = Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
