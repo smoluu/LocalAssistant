@@ -31,7 +31,6 @@ import com.localassistant.app.data.settings.SettingsRepository
 import com.localassistant.app.ui.chat.ChatScreen
 import com.localassistant.app.ui.settings.SettingsScreen
 import com.localassistant.app.ui.theme.LocalAssistantTheme
-import com.localassistant.app.ui.wake.WakeChatScreen
 import com.localassistant.app.ui.wake.WakeChatViewModel
 import android.view.KeyEvent
 import java.util.Locale
@@ -266,10 +265,11 @@ class MainActivity : ComponentActivity() {
                         color = MaterialTheme.colorScheme.background
                     ) {
                         MainNavigation(hasPermissions = hasPermissions)
-                        // Drawn after the navigation screens, so the wake chat is an
-                        // app-level layer over whatever is on screen rather than part
-                        // of the chat screen.
-                        WakeOverlay(
+                        // The wake chat draws nothing here: its one rendering is the
+                        // window the system shows over every screen, which covers
+                        // the app's own surface too. This only keeps the service
+                        // that feeds that window running.
+                        WakeChatListening(
                             wakeEnabled = settings.enableWakeWordDetection,
                             hasPermissions = hasPermissions
                         )
@@ -400,15 +400,17 @@ fun MainNavigation(hasPermissions: Boolean) {
 }
 
 /**
- * The wake-word chat as an app-level layer.
+ * Keeps the wake-chat service running.
  *
- * It lives outside the navigation graph and is drawn last, so the card overlays
- * whichever screen is open. The service is started from here - not from the chat
- * screen - because it is a foreground service that must keep listening even when
- * the app is minimized; this layer only renders whatever the service is doing.
+ * It draws nothing. The wake chat has exactly one rendering - the voice-interaction
+ * window the system shows over every screen, including this app's own surface - so
+ * an app-level copy of the card would be a second, divergent UI. This composable
+ * only starts the foreground service that feeds that window, which is why it stays
+ * outside the navigation graph: the service must keep listening while the app is
+ * minimized, and a screen inside the navigation graph would tear it down.
  */
 @Composable
-fun WakeOverlay(wakeEnabled: Boolean, hasPermissions: Boolean) {
+fun WakeChatListening(wakeEnabled: Boolean, hasPermissions: Boolean) {
     val wakeViewModel = androidx.lifecycle.viewmodel.compose.viewModel<com.localassistant.app.ui.wake.WakeChatViewModel>()
 
     LaunchedEffect(wakeEnabled, hasPermissions) {
@@ -418,8 +420,6 @@ fun WakeOverlay(wakeEnabled: Boolean, hasPermissions: Boolean) {
             wakeViewModel.stopListening()
         }
     }
-
-    WakeChatScreen(wakeViewModel)
 }
 
 /**

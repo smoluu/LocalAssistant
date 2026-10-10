@@ -6,12 +6,16 @@ import android.os.Build
 import com.localassistant.app.service.WakeChatService
 
 /**
- * The wake-word overlay's renderer.
+ * Starts and stops the wake-word pipeline.
  *
- * The pipeline itself runs in [WakeChatService], a foreground service that keeps
+ * The pipeline runs in [WakeChatService], a foreground service that keeps
  * listening while the app is minimized, so its state cannot live in a view model
- * that only exists while the app is open. This class only forwards that state to
- * [WakeChatScreen] and asks the service to start or stop.
+ * that only exists while the app is open. This class holds none of it: it only
+ * asks the service to start or stop.
+ *
+ * It renders nothing. The wake chat has one rendering - the voice-interaction
+ * window the system draws over every screen, which covers this app's own surface
+ * too - so there is no card here to forward the exchange to.
  */
 class WakeChatViewModel(application: android.app.Application) : AndroidViewModel(application) {
 
@@ -19,13 +23,6 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
 
     @Volatile
     private var serviceRunning = false
-
-    // The conversation, the overlay's visibility, which stage the exchange is at and
-    // any error to show on it. All of it belongs to the service.
-    val messages get() = WakeChatService.messages
-    val overlay get() = WakeChatService.overlay
-    val phase get() = WakeChatService.phase
-    val statusMessage get() = WakeChatService.statusMessage
 
     /**
      * Start the wake-chat service. Idempotent so navigation re-entry cannot ask
@@ -41,28 +38,6 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
         if (!serviceRunning) return
         serviceRunning = false
         send(WakeChatService.ACTION_STOP)
-    }
-
-    /**
-     * Keep the open exchange alive: the service closes it only once nothing has
-     * happened on it for [WakeChatService] `wakeChatCloseSeconds`, so any touch
-     * of the card restamps that clock.
-     */
-    fun touchChat() {
-        WakeChatService.touchChat()
-    }
-
-    /**
-     * End the exchange and drop its history. The card is a single exchange, never
-     * a running log: closing it clears the messages, so the next one starts empty.
-     *
-     * The close is sent to the service as an intent rather than called here,
-     * because the service has to tell the session it drew over the screen about
-     * the end of the exchange too, and that lives in the service, not in the
-     * companion object this renderer can reach.
-     */
-    fun closeChat() {
-        send(WakeChatService.ACTION_CLOSE_CHAT)
     }
 
     private fun send(action: String) {

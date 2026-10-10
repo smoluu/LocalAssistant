@@ -30,6 +30,15 @@ const val SESSION_REPLY_KEY = "reply"
  */
 const val SESSION_STATE_KEY = "state"
 
+/**
+ * The window is being raised and the card is still climbing from the bottom edge.
+ *
+ * The rise is a sequence of shows rather than an animation - see [RISE_FRAMES]
+ * for why there is no animation API here - so the wake service asks for the
+ * window several times in a row before the exchange itself has anything to show.
+ */
+const val SESSION_STATE_RISE = "rise"
+
 /** The phrase was heard; the app is waiting for the request. */
 const val SESSION_STATE_LISTENING = "listening"
 
@@ -65,32 +74,42 @@ private const val USER_BUBBLE = 0xFF3A3A3A.toInt()
 private const val REPLY_BUBBLE = 0xFF342A1F.toInt()
 
 /**
- * Where the card sits inside the window the system gives a session.
+ * Where the card sits inside the stage.
  *
- * This is [android.ui.Gravity]'s BOTTOM (0x2) combined with its MIDDLE (0x20),
- * which centres horizontally. The package itself is not reachable from this
- * Kotlin toolchain - `android.ui` is unresolved - so the bits are spelled out
- * here rather than named.
+ * These are [android.ui.Gravity]'s BOTTOM (0x2) combined with its CENTER_HORIZONTAL
+ * (0x1). The package itself is not reachable from this Kotlin toolchain -
+ * `android.ui` is unresolved - so the bits are spelled out here rather than named.
+ * CENTER_VERTICAL (0x20) is deliberately not set: the stage is as tall as its
+ * content, so vertical placement inside it is decided by the riser under the card
+ * instead.
  */
-private const val BOTTOM_CENTER_GRAVITY = 0x2 or 0x20
+private const val BOTTOM_CENTER_GRAVITY = 0x2 or 0x1
+
+/** The bits that centre text inside a bubble - CENTER_HORIZONTAL and CENTER_VERTICAL. */
+private const val CENTER_GRAVITY = 0x1 or 0x20
 
 /**
- * The size the stage is forced to before the card is added to it.
+ * How big the card is.
  *
- * The window is `(0,0)(fillxfill)`, i.e. the whole screen, but a
- * `LinearLayout` measures to its content, so without a forced size the stage is
- * exactly as large as the card and `setGravity` has nothing to position within -
- * the card then lands in the window's top-left corner, which is what the user
- * sees when the exchange is raised. Forcing a size far beyond any display makes
- * the measure pass clamp the stage to the space the window offers, which is the
- * screen, and gravity can bottom-centre the card in it.
+ * A session cannot read the display: `android.graphics.DisplayMetrics`,
+ * `getDisplayMetrics` and `android.widget.internal` (a `Filler` spacer) are all
+ * unreachable, `View.setFillDimensions` does not exist, and a forced minimum
+ * (`setMinimumWidth`/`setMinimumHeight`) is not honoured by the window's measure
+ * pass - forcing one left the card in the window's top-left corner, which is what
+ * the user reported. The width therefore comes from the wrapped text plus the
+ * card's own padding, which is the one sizing API the measure pass does honour.
  *
- * There is no other way to fill the stage here: `setFillDimensions` does not
- * exist in this toolchain, `android.widget.internal` (the package holding a
- * `Filler` spacer) is unreachable, and no accessor for the display size
- * (`android.graphics.DisplayMetrics`, `getDisplayMetrics`) resolves either.
+ * [CARD_WIDTH] is a fixed pixel width rather than a fraction of the screen, and
+ * that is what makes the card the same size in landscape and portrait: it is
+ * narrower than the short edge of any phone-sized display, so it never has to be
+ * reflowed for the orientation the device happens to be in.
  */
-private const val STAGE_MINIMUM = 99999
+private const val CARD_WIDTH = 1200
+private const val TEXT_SIZE = 19f
+private const val CARD_SIDE_PADDING = 40
+private const val CARD_TOP_PADDING = 28
+private const val CARD_BOTTOM_PADDING = 28
+private const val BUBBLE_PADDING = 24
 
 /**
  * How much text the card can show.
@@ -99,9 +118,43 @@ private const val STAGE_MINIMUM = 99999
  * line gets one of a fixed pool of TextViews - the pool is fixed because the
  * session builds its content view once and reuses it for every later show, so
  * the structure cannot grow with the text.
+ *
+ * [LINE_CHARS] is chosen so a full line fits [CARD_WIDTH]: at [TEXT_SIZE] a
+ * character is roughly 45 px wide, so 26 characters fill the card without
+ * overflowing it.
  */
 private const val MAX_LINES = 6
-private const val LINE_CHARS = 48
+private const val LINE_CHARS = 26
+
+/**
+ * How the card climbs from the bottom edge, and for how many shows.
+ *
+ * There is no animation API here: `View.startAnimation` and `View.setAnimation`
+ * exist but their argument type is `android.animation.Animation`, which this
+ * toolchain can neither name nor construct - `android.animation.Animation`,
+ * every `android.animatable.*` spelling and `android.app.Activity.loadAnimation`
+ * are unresolved, and the only members of `android.animation` that do resolve
+ * ([android.animation.Animator] and [android.animation.Keyframe]) are abstract
+ * classes with no constructor. The motion is therefore a sequence of shows: the
+ * wake service raises the window several times in a row and each show draws the
+ * card a little higher, which reads as a slide up from the bottom edge.
+ *
+ * The climb is arithmetic rather than a list of heights because a file-scope
+ * `const val` may only hold a primitive or a String - `const val RISE_GAP =
+ * listOf(...)` is rejected with "Const 'val' has type 'List<Int>'. Only
+ * primitive types and 'String' are allowed" - and the frame count is the part of
+ * this contract [WakeChatService] has to see, so it has to be an Int.
+ *
+ * The gap is padding rather than `setMinimumHeight` because padding is the sizing
+ * API the window's measure pass honours and a minimum is not. [RISE_FRAMES]
+ * steps take the card from [RISE_START] down to just above [RESTING_GAP], so the
+ * last step is small and the card settles above the bottom edge instead of flush
+ * against it.
+ */
+const val RISE_FRAMES = 4
+const val RISE_START = 440
+const val RISE_STEP = 120
+private const val RESTING_GAP = 56
 
 /**
  * The session half of the wake pipeline.
@@ -121,7 +174,9 @@ private const val LINE_CHARS = 48
  * The content view is built from the legacy Java UI classes ([LinearLayout],
  * [TextView]) because that is what a session window accepts:
  * [VoiceInteractionSession.onCreateContentView][onCreateContentView] returns an
- * [android.view.View], not a Compose surface.
+ * [android.view.View], not a Compose surface. The card is styled to match the
+ * card the app draws itself, and it is the only rendering of the wake chat - the
+ * app-level overlay was removed so both halves show the same thing.
  */
 class WakeChatSessionService : VoiceInteractionSessionService() {
 
@@ -170,10 +225,23 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
     private var reply = ""
 
     /**
+     * Which step of the climb from the bottom edge the next show is.
+     *
+     * The session is created per exchange, so this counts from the first show of
+     * an exchange and never needs resetting.
+     */
+    private var riseFrame = 0
+
+    /**
      * The views the window shows, built once here and only ever mutated after.
      *
      * An empty `TextView` measures nothing and a transparent background paints
      * nothing, so a state that shows no turn contributes no height and no ink.
+     *
+     * The riser is under the card, not above it: the stage is as tall as its
+     * content and the window places that content on the screen, so the only way
+     * to lift the card off the bottom edge is to make the content taller below
+     * the card, and the riser is that height.
      */
     private val stage = LinearLayout(context)
     private val card = LinearLayout(context)
@@ -182,32 +250,40 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
     private val userLines = (0 until MAX_LINES).map { _ -> TextView(context) }
     private val replyBubble = LinearLayout(context)
     private val replyLines = (0 until MAX_LINES).map { _ -> TextView(context) }
+    private val riser = LinearLayout(context)
 
     /**
      * Records what the platform is about to show.
      *
      * AOSP calls this before it asks for the content view, so the text has to be
-     * taken here rather than read where the views are built.
+     * taken here rather than read where the views are built. A rise frame only
+     * advances the climb; every other state settles the card at its resting
+     * height, so an exchange that is interrupted mid-climb still ends in the
+     * same place.
      */
     override fun onPrepareShow(args: android.os.Bundle, showFlags: Int) {
         state = args.getString(SESSION_STATE_KEY) ?: ""
         request = args.getString(SESSION_REQUEST_KEY) ?: ""
         reply = args.getString(SESSION_REPLY_KEY) ?: ""
+        if (state == SESSION_STATE_RISE) {
+            if (riseFrame < RISE_FRAMES) riseFrame++
+        } else {
+            riseFrame = RISE_FRAMES
+        }
         paint()
     }
 
     /**
-     * Wires the card once and returns the stage that fills the window.
+     * Wires the card once and returns the stage the window shows.
      *
      * The structure is wired here and never again; only [paint] changes what is
      * drawn. Painting again after wiring is what makes the first exchange show
      * the text that [onPrepareShow] already recorded, and it is harmless on
      * every later show because painting is idempotent.
      *
-     * The stage is deliberately left unpainted: the system stretches a session's
-     * content view over the whole window it owns, so a background here would
-     * cover every pixel and hide whatever the device is showing - the complaint
-     * the user sees as "it's fullscreen". Only the card itself is painted.
+     * The stage is deliberately left unpainted: it is as large as the card plus
+     * the riser, so a background here would paint the riser too and turn the
+     * card into a tall block. Only the card and the bubbles inside it are painted.
      */
     override fun onCreateContentView(): View {
         Log.i(
@@ -215,25 +291,30 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
             "Wiring the card for state=$state, a ${request.length}-character request and a ${reply.length}-character reply"
         )
         stage.setGravity(BOTTOM_CENTER_GRAVITY)
-        stage.setMinimumWidth(STAGE_MINIMUM)
-        stage.setMinimumHeight(STAGE_MINIMUM)
         stage.addView(card)
-        card.setPadding(20, 16, 20, 16)
+        stage.addView(riser)
+        card.setGravity(BOTTOM_CENTER_GRAVITY)
+        card.setPadding(CARD_SIDE_PADDING, CARD_TOP_PADDING, CARD_SIDE_PADDING, CARD_BOTTOM_PADDING)
         card.addView(notice)
-        notice.textSize = 19f
+        notice.setGravity(CENTER_GRAVITY)
+        notice.textSize = TEXT_SIZE
         notice.setTextColor(MUTED)
         card.addView(userBubble)
-        userBubble.setPadding(14, 10, 14, 10)
+        userBubble.setGravity(CENTER_GRAVITY)
+        userBubble.setPadding(BUBBLE_PADDING, BUBBLE_PADDING, BUBBLE_PADDING, BUBBLE_PADDING)
         userLines.forEach { line ->
             userBubble.addView(line)
-            line.textSize = 19f
+            line.setGravity(CENTER_GRAVITY)
+            line.textSize = TEXT_SIZE
             line.setTextColor(MUTED)
         }
         card.addView(replyBubble)
-        replyBubble.setPadding(14, 10, 14, 10)
+        replyBubble.setGravity(CENTER_GRAVITY)
+        replyBubble.setPadding(BUBBLE_PADDING, BUBBLE_PADDING, BUBBLE_PADDING, BUBBLE_PADDING)
         replyLines.forEach { line ->
             replyBubble.addView(line)
-            line.textSize = 19f
+            line.setGravity(CENTER_GRAVITY)
+            line.textSize = TEXT_SIZE
             line.setTextColor(REPLY_TEXT)
         }
         paint()
@@ -261,6 +342,20 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
         wrap(reply).forEachIndexed { index, line ->
             if (index < replyLines.size) replyLines[index].text = line
         }
+        riser.setPadding(0, gap(), 0, 0)
+        riser.setBackgroundColor(TRANSPARENT)
+    }
+
+    /**
+     * How far the card sits above the bottom edge for the current show.
+     *
+     * A closed exchange has no card at all, so it gets no gap either - the riser
+     * must not hold the window open above nothing.
+     */
+    private fun gap(): Int {
+        if (state == SESSION_STATE_CLOSE) return 0
+        if (riseFrame >= RISE_FRAMES) return RESTING_GAP
+        return RISE_START - RISE_STEP * riseFrame
     }
 
     /**
@@ -309,6 +404,7 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
         state = ""
         request = ""
         reply = ""
+        riseFrame = 0
     }
 
     /**

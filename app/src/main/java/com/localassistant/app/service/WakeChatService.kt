@@ -61,14 +61,15 @@ class WakeChatService : VoiceInteractionService() {
         // conversations can open this service without the app being involved.
         const val ACTION_VOICE_INTERACTION = "android.service.voice.VoiceInteractionService"
         // Closing an open chat from outside the app (the system, or a stale intent
-        // left in the queue). The app's own overlay closes it through the
-        // service's endExchange(), since the UI and the service share this process.
+        // left in the queue). Nothing in the app draws the card any more, so this
+        // action is the only outside way to end an exchange; the idle timeout ends
+        // it through the service's endExchange().
         const val ACTION_CLOSE_CHAT = "com.localassistant.CLOSE_WAKE_CHAT"
         // Runs one exchange without waiting for the wake phrase, so the pipeline
         // can be exercised from Settings.
         const val ACTION_TRIGGER_EXCHANGE = "com.localassistant.TRIGGER_WAKE_CHAT"
 
-        // Phases the overlay shows
+        // Phases an exchange is in
         const val PHASE_IDLE = "idle"
         const val PHASE_DETECTING = "detecting"
         const val PHASE_LISTENING = "listening"
@@ -83,6 +84,10 @@ class WakeChatService : VoiceInteractionService() {
         // How often the idle-close watchdog re-reads the activity stamp. The
         // length of the wait itself is the user's setting, never a constant.
         private const val TOUCH_POLL_MS = 200L
+        // How long one frame of the card's climb from the bottom edge lasts. The
+        // number of frames is [RISE_FRAMES], the same count the session counts its
+        // climb in, so the two halves cannot drift apart.
+        private const val RISE_FRAME_MS = 70L
 
         /**
          * Build an intent for this service with the given action.
@@ -96,11 +101,10 @@ class WakeChatService : VoiceInteractionService() {
         // ==================== State shared with the app ====================
         //
         // A foreground service runs in the same process as the app, so the
-        // overlay can read these flows while the app is open. When it is not, the
-        // notification below carries the same exchange.
+        // session window's own half cannot read these flows - it runs elsewhere -
+        // and the notification below carries the same exchange.
 
         private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
-        private val _overlay = MutableStateFlow(false)
         private val _phase = MutableStateFlow(PHASE_IDLE)
         private val _statusMessage = MutableStateFlow("")
         // When the chat last saw activity. The idle-close watchdog compares this
@@ -110,7 +114,6 @@ class WakeChatService : VoiceInteractionService() {
         private val _lastActivity = MutableStateFlow(System.currentTimeMillis())
 
         val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
-        val overlay: StateFlow<Boolean> = _overlay.asStateFlow()
         val phase: StateFlow<String> = _phase.asStateFlow()
         val statusMessage: StateFlow<String> = _statusMessage.asStateFlow()
 
@@ -137,7 +140,6 @@ class WakeChatService : VoiceInteractionService() {
          */
         fun closeChat() {
             _messages.value = emptyList()
-            _overlay.value = false
             _phase.value = PHASE_DETECTING
             _lastActivity.value = System.currentTimeMillis()
         }
@@ -249,7 +251,7 @@ class WakeChatService : VoiceInteractionService() {
         // The system is standing its voice infrastructure down, so the loop that
         // feeds it stops with it and the card slides away.
         stopListening()
-        hideOverlay()
+        lowerCard()
     }
 
     override fun onLaunchVoiceAssistFromKeyguard() {
@@ -263,10 +265,10 @@ class WakeChatService : VoiceInteractionService() {
      * The system is about to draw a voice session over whatever the device is
      * showing, so raise our own card for the same moment. The bundle carries the
      * system's own session arguments, which we never read - we only mirror the
-     * state into the overlay and the notification.
+     * state into the notification.
      */
     override fun onPrepareToShowSession(args: android.os.Bundle, flags: Int) {
-        showOverlay("")
+        raiseCard("")
         _phase.value = PHASE_LISTENING
         updateNotification(getPhaseText(PHASE_LISTENING))
     }
@@ -305,7 +307,6 @@ class WakeChatService : VoiceInteractionService() {
         listening = true
         stopSignal.set(false)
         _phase.value = PHASE_DETECTING
-        _overlay.value = false
 
         val scope = serviceScope
         scope.launch { wakeLoop() }
@@ -335,22 +336,20 @@ class WakeChatService : VoiceInteractionService() {
     }
 
     /**
-     * Raises the overlay, with an optional line to show on it.
+     * Raises the card with an optional line to show on it.
      *
      * Raising the card is itself activity, so it stamps the close clock.
      */
-    private fun showOverlay(message: String) {
-        _overlay.value = true
+    private fun raiseCard(message: String) {
         _statusMessage.value = message
         touchChat()
     }
 
     /**
-     * Lowers the overlay and returns to listening, so an app that is merely
+     * Lowers the card and returns to listening, so an app that is merely
      * listening never covers the screen it is on.
      */
-    private fun hideOverlay() {
-        _overlay.value = false
+    private fun lowerCard() {
         _phase.value = PHASE_DETECTING
     }
 
@@ -405,10 +404,10 @@ class WakeChatService : VoiceInteractionService() {
         if (references.isEmpty()) {
             // Nothing can match yet, so this is the one case worth showing.
             val hint = "No wake-word references recorded - open Settings and speak the phrase"
-            showOverlay(hint)
+            raiseCard(hint)
             updateNotification(hint)
             delay(REFERENCE_HINT_MS)
-            hideOverlay()
+            lowerCard()
             return false
         }
 
@@ -434,14 +433,20 @@ class WakeChatService : VoiceInteractionService() {
             // recognised on-device, so sending it to STT would put the wake word in
             // front of the request. The chime is the user's cue that the microphone
             // is recording now, and it has to finish before the recording starts.
-            showOverlay("")
+            playWakeCue()
+            raiseCard("")
             _phase.value = PHASE_LISTENING
             updateNotification(getPhaseText(PHASE_LISTENING))
-            playWakeCue()
             // The window is raised the moment the phrase is heard, before the
             // request is recorded. A session that only appears once the reply is
             // ready tells the user nothing about the exchange they are in - they
             // would be speaking into a screen that shows nothing.
+            //
+            // The climb up from the bottom edge is a run of shows rather than an
+            // animation, because a session has no animation API - see [RISE_FRAMES].
+            // The last show settles the card and is the one that carries the
+            // "I'm listening" text.
+            raiseSessionWindow()
             requestSession(SESSION_STATE_LISTENING, "", "")
 
             // The reply window is the user's setting: enough time to say the
@@ -480,7 +485,6 @@ class WakeChatService : VoiceInteractionService() {
 
             answer(request, currentSettings)
         }
-        _overlay.value = false
         _phase.value = PHASE_IDLE
     }
 
@@ -541,6 +545,27 @@ class WakeChatService : VoiceInteractionService() {
     }
 
     /**
+     * Raise the session window with the card climbing up from the bottom edge.
+     *
+     * A session has no animation API - [View.startAnimation] and
+     * [VoiceInteractionSession.setContentView] are the only motion hooks and both
+     * need an [android.animation.Animation], which this toolchain cannot name or
+     * construct - so the climb is a run of shows and the session draws the card
+     * higher each time. [RISE_FRAMES] is the session's own frame count, so the
+     * number of shows here cannot drift from the number of positions there.
+     *
+     * The frames are short on purpose: each one is a round trip to the session's
+     * process and the window is on screen from the first, so the user only sees
+     * the card move.
+     */
+    private suspend fun raiseSessionWindow() {
+        for (frame in 0 until RISE_FRAMES) {
+            requestSession(SESSION_STATE_RISE, "", "")
+            delay(RISE_FRAME_MS)
+        }
+    }
+
+    /**
      * Ask the platform to show a voice session carrying this exchange.
      *
      * The session is drawn by [WakeChatSessionService] in its own process, so it
@@ -572,8 +597,8 @@ class WakeChatService : VoiceInteractionService() {
     }
 
     /**
-     * End the open exchange everywhere: the app's overlay, and the window the
-     * system drew over whatever the device is showing.
+     * End the open exchange everywhere: the state this service holds, and the
+     * window the system drew over whatever the device is showing.
      *
      * [closeChat] clears the state both halves share, but the session runs in
      * another process and only sees the bundles it is handed, so the end of the
