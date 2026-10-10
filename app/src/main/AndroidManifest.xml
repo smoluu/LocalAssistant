@@ -135,15 +135,22 @@
             over the home screen or over whatever app the device is showing - the
             only place the wake chat can appear while the app is minimized.
 
-            The platform's own VoiceInteractionSessionService documentation says
-            this half "should run in a separate process" from the service that
-            asked for the session, so it is declared as an isolated process: the
-            system can then start it on its own, without the app being in the
-            foreground.
+            It deliberately shares the app's own process. AOSP's class docs
+            suggest a separate process, and the tab does start one ("Start proc
+            …WakeChatSessionService … for service {…}"), but the framework's
+            onCreate() resolves the VoiceInteractionManagerService through the
+            service registry of *that* process, which in an isolated process
+            holds only this service - so the field stays null and the very next
+            framework call, deliverSession, throws
+            "NullPointerException … 'IVoiceInteractionManagerService.deliverNewSession'
+            on a null object reference", which is the "LocalAssistant has stopped"
+            dialog the user sees on every exchange. The manager service is
+            resolvable only in the process that hosts the voice-interaction
+            service itself, which is where VoiceInteractionService.onReady()
+            resolves it from, so the two halves have to share it.
         -->
         <service
             android:name=".service.WakeChatSessionService"
-            android:isolatedProcess="true"
             android:exported="true" />
 
         <!--
