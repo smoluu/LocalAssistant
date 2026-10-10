@@ -168,15 +168,16 @@ private const val LINE_CHARS = 26
  * this contract [WakeChatService] has to see, so it has to be an Int.
  *
  * The gap is padding rather than `setMinimumHeight` because padding is the sizing
- * API the window's measure pass honours and a minimum is not. [RISE_FRAMES]
- * steps take the card from [RISE_START] down to just above [RESTING_GAP], so the
- * last step is small and the card settles above the bottom edge instead of flush
- * against it.
+ * API the window's measure pass honours and a minimum is not. The climb runs
+ * **up** from [RISE_START] to [RESTING_GAP] across [RISE_FRAMES] shows, so the
+ * first show puts the card flush against the bottom edge - it pops up from
+ * there, rather than appearing already in mid-air - and the last settles it
+ * clear of the edge.
  */
 const val RISE_FRAMES = 4
-const val RISE_START = 440
-const val RISE_STEP = 120
-private const val RESTING_GAP = 56
+const val RISE_START = 0
+const val RISE_STEP = 50
+private const val RESTING_GAP = 150
 
 /**
  * The session half of the wake pipeline.
@@ -397,7 +398,7 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
     private fun gap(): Int {
         if (state == SESSION_STATE_CLOSE) return 0
         if (riseFrame >= RISE_FRAMES) return RESTING_GAP
-        return RISE_START - RISE_STEP * riseFrame
+        return RISE_START + RISE_STEP * (riseFrame - 1)
     }
 
     /**
