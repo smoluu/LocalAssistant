@@ -175,6 +175,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, viewModel: SettingsViewModel = vi
     val wakeWordTesting by viewModel.wakeWordTesting.collectAsState()
     val wakeReferenceCount by viewModel.wakeReferenceCount.collectAsState()
     val wakeBusyLabel by viewModel.wakeBusyLabel.collectAsState()
+    val defaultAssistantHeld by viewModel.defaultAssistantHeld.collectAsState()
     val savedPresets by viewModel.presets.collectAsState()
 
     var showClearDataDialog by remember { mutableStateOf(false) }
@@ -326,6 +327,29 @@ fun SettingsScreen(onNavigateBack: () -> Unit, viewModel: SettingsViewModel = vi
                 Spacer(modifier = Modifier.height(8.dp))
                 SettingSwitch("Wake Word Detection", settings.enableWakeWordDetection, { viewModel.updateSetting("enableWakeWordDetection", it) })
                 TestButton("Test Wake Word", true, wakeWordTesting) { viewModel.runWakeWordTest() }
+            }
+
+            SettingsSection("Default Digital Assistant", "🎙️", "Let the system host the wake chat over any screen") {
+                Text(
+                    text = when (defaultAssistantHeld) {
+                        true -> "Set as the default digital assistant - the wake chat is drawn over the home screen and over any other app, and its reply arrives on the notification."
+                        false -> "Not set as the default digital assistant - the wake chat only appears inside this app. Choose LocalAssistant in the system's list to have it host conversations everywhere else."
+                        else -> "This platform has no default-assistant setting, so the wake chat stays inside the app."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = when (defaultAssistantHeld) {
+                        true -> MaterialTheme.colorScheme.primary
+                        false -> MaterialTheme.colorScheme.error
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
+                if (defaultAssistantHeld != true) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = { viewModel.openAssistantSettings() },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                    ) { Text("Open the assistant settings") }
+                }
             }
 
             SettingsSection("Data Management", "💾", "Export, import, and manage your settings data") {

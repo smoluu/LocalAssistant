@@ -31,9 +31,14 @@
     <!-- For requesting battery optimization exemption -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
-    <!-- Lets the system host our voice chat as its own voice-interaction service,
-         so the exchange can be drawn over the system UI and other apps. -->
-    <uses-permission android:name="android.permission.BIND_VOICE_INTERACTION" />
+    <!--
+        BIND_VOICE_INTERACTION is not a runtime permission and is not declared here:
+        it is the capability a service declares on itself with android:permission on
+        its <service> element (see the wake chat service below). The platform reads
+        that annotation - VoiceInteractionServiceInfo rejects a service whose
+        ServiceInfo.permission is not android.permission.BIND_VOICE_INTERACTION,
+        which is what kept this app out of the "Default digital assistant" picker.
+    -->
 
     <!-- Bluetooth for headset controls (optional enhancement) -->
     <!-- <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" /> -->
@@ -96,11 +101,23 @@
             The meta-data item points at the resource that names this service and
             the session service that draws its exchanges; without it the platform
             has no way to find the session half.
+
+            The service is exported: an assistant picker that runs in another
+            package - the system "Default digital assistant" selector - only sees
+            activities that are exported to it, so exported="false" here hides the
+            app from that picker entirely.
+
+            android:permission is the capability the platform requires before it
+            will treat this service as an assistant at all: VoiceInteractionServiceInfo
+            answers "Service does not require permission android.permission.BIND_VOICE_INTERACTION"
+            for any service that does not declare it, and the whole voice-interaction
+            path - the picker's list, onReady(), showSession() - is dead until it does.
         -->
         <service
             android:name=".service.WakeChatService"
             android:foregroundServiceType="microphone"
-            android:exported="false">
+            android:permission="android.permission.BIND_VOICE_INTERACTION"
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.service.voice.VoiceInteractionService" />
             </intent-filter>
@@ -127,7 +144,7 @@
         <service
             android:name=".service.WakeChatSessionService"
             android:isolatedProcess="true"
-            android:exported="false" />
+            android:exported="true" />
 
         <!--
             BOOT COMPLETED RECEIVER

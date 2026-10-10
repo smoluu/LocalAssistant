@@ -1,11 +1,33 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-    Tells the platform which of LocalAssistant's services host hands-free
-    conversations and which one draws them over the system UI. The system reads
-    this through the "android.voice_interaction" meta-data item declared next to
-    the wake service in AndroidManifest.xml.
+    The contract the platform reads before it will treat this app as a digital
+    assistant at all. VoiceInteractionServiceInfo parses this resource and answers
+    with a reason for every field it cannot find, so the whole voice-interaction
+    path - the system "Default digital assistant" picker, onReady(), showSession()
+    - is dead while any of it is missing.
+
+    The fields are attributes of this element, not child elements: the parser reads
+    them through getAttribute (sessionService, recognitionService, settingsActivity,
+    supportsAssist, ...) and a parse error sets mValid = false in
+    VoiceInteractionManagerServiceImpl, which means onReady() never runs and
+    showSession() throws.
+
+    sessionService and recognitionService are both required - the parser reports
+    "No sessionService specified" and "No recognitionService specified" - and both
+    are resolved in this app's own package, so they are dotted class names relative
+    to it.
+
+    settingsActivity is the activity the platform opens when the user wants to
+    configure the assistant; MainActivity is the app's only entry point.
+
+    supportsLocalInteraction is what the platform needs to know to host the
+    exchange on the device itself rather than remotely, which is the whole point
+    of a local-first assistant.
 -->
-<voice-interaction-service>
-    <my-service service="com.localassistant.app.service.WakeChatService"/>
-    <session-service service="com.localassistant.app.service.WakeChatSessionService"/>
-</voice-interaction-service>
+<voice-interaction-service
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sessionService="com.localassistant.app.service.WakeChatSessionService"
+    android:recognitionService="com.localassistant.app.service.WakeChatRecognitionService"
+    android:settingsActivity="com.localassistant.app.ui.MainActivity"
+    android:supportsAssist="true"
+    android:supportsLocalInteraction="true" />

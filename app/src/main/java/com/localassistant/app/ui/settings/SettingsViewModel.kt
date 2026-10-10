@@ -17,6 +17,8 @@ import com.localassistant.app.ui.common.recordAudioWithVAD
 import com.localassistant.app.ui.common.referenceFrameCount
 import com.localassistant.app.ui.common.saveWakeReference
 import com.localassistant.app.ui.common.wakeCostThreshold
+import com.localassistant.app.ui.common.assistantSettingsIntent
+import com.localassistant.app.ui.common.isDefaultAssistantHeld
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -253,6 +255,38 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     // from the enrollment file so the count survives an app restart.
     private val _wakeReferenceCount = MutableStateFlow(loadWakeReferences(appContext).size)
     val wakeReferenceCount: StateFlow<Int> = _wakeReferenceCount.asStateFlow()
+
+    // Whether the platform has bound this app as its default digital assistant.
+    // Null means the platform has no assistant role to ask about, which the screen
+    // must render as "cannot tell" rather than as a problem the user can fix.
+    private val _defaultAssistantHeld = MutableStateFlow(isDefaultAssistantHeld(appContext))
+    val defaultAssistantHeld: StateFlow<Boolean?> = _defaultAssistantHeld.asStateFlow()
+
+    /**
+     * Re-reads the assistant role after the user has been taken to the Settings
+     * page, so the status line reflects whatever they just chose.
+     */
+    private fun refreshAssistantRole() {
+        _defaultAssistantHeld.value = isDefaultAssistantHeld(appContext)
+    }
+
+    /**
+     * Opens the platform's page for choosing the default digital assistant.
+     *
+     * The role request is the platform's own way of getting there; where the role
+     * API is absent the documented settings key is used instead.
+     */
+    fun openAssistantSettings() {
+        val intent = assistantSettingsIntent(appContext)
+        try {
+            appContext.startActivity(intent)
+            // The role is held only after the user finishes choosing on that page,
+            // so the status is re-read the next time the screen is opened.
+            refreshAssistantRole()
+        } catch (e: Exception) {
+            android.util.Log.w("LocalAssistant", "openAssistantSettings: ${intent.action} - ${e.message}")
+        }
+    }
 
     /**
      * Names the failure the way the user should see it: the exception type plus
