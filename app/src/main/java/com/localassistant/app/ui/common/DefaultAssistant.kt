@@ -20,6 +20,14 @@ import android.content.Intent
  * voice-interaction service makes the app eligible for. Older platforms have no
  * such role, so every entry point here answers "unknown" rather than guessing,
  * and the settings page is reached through its documented activity keys instead.
+ *
+ * A vendor build may implement its own picker that only records the choice in
+ * `Settings.Secure` and never grants the role; this toolchain cannot name
+ * [android.app.ComponentName] or [android.content.Settings], so the platform's
+ * own `isActiveService` test cannot be reached here and such a build reports
+ * "not held". The voice service itself is the other half of the truth: its
+ * [WakeChatService.onReady] only runs when the platform has really bound this
+ * app as its service.
  */
 
 // The values of android.content.Intent.Settings.ACTION_VOICE_INPUT_SETTINGS and
