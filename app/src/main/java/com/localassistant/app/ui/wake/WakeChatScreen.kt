@@ -6,6 +6,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -27,6 +28,10 @@ import com.localassistant.app.ui.wake.WakeChatViewModel
  * and nothing is painted while the app is only listening. The card rises from the
  * bottom when the wake phrase is heard, and the conversation stays inside it until
  * the exchange ends.
+ *
+ * The card is also the control surface for the exchange's lifetime: touching any
+ * part of it restamps the service's close clock, and tapping the area above it -
+ * off the chat - ends the exchange and drops its history.
  */
 @Composable
 fun WakeChatScreen(viewModel: WakeChatViewModel = viewModel()) {
@@ -35,21 +40,34 @@ fun WakeChatScreen(viewModel: WakeChatViewModel = viewModel()) {
     val phase by viewModel.phase.collectAsState()
     val statusMessage by viewModel.statusMessage.collectAsState()
 
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.BottomCenter,
-        content = {
-            AnimatedVisibility(
-                visible = overlay,
-                enter = slideInVertically { fullHeight -> fullHeight } + fadeIn(),
-                exit = slideOutVertically { fullHeight -> fullHeight } + fadeOut()
-            ) {
-                Column(
-                    modifier = Modifier.width(420.dp).padding(horizontal = 16.dp).padding(bottom = 8.dp)
-                ) {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Everything above the card is "off the chat": a tap there unfocuses the
+        // exchange, so the service clears it and the next one starts with no history.
+        Box(
+            modifier = Modifier.fillMaxWidth().weight(1f).clickable(
+                onClickLabel = "Close the wake chat",
+                onClick = { viewModel.closeChat() }
+            )
+        ) {}
+
+        AnimatedVisibility(
+            visible = overlay,
+            enter = slideInVertically { fullHeight -> fullHeight } + fadeIn(),
+            exit = slideOutVertically { fullHeight -> fullHeight } + fadeOut()
+        ) {
+            Box(
+                modifier = Modifier.fillMaxWidth(),
+                contentAlignment = Alignment.BottomCenter,
+                content = {
+                    Column(
+                        modifier = Modifier.width(420.dp).padding(horizontal = 16.dp).padding(bottom = 8.dp)
+                    ) {
+                        Card(
+                            modifier = Modifier.fillMaxWidth().clickable(
+                                onClickLabel = "Keep the wake chat open",
+                                onClick = { viewModel.touchChat() }
+                            ),
+                            shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
                         colors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.surfaceVariant
                         )
@@ -96,7 +114,10 @@ fun WakeChatScreen(viewModel: WakeChatViewModel = viewModel()) {
 
                     messages.takeLast(8).forEach { message ->
                         Card(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable(
+                                onClickLabel = "Keep the wake chat open",
+                                onClick = { viewModel.touchChat() }
+                            ),
                             colors = CardDefaults.cardColors(
                                 containerColor = if (message.role.name == "USER") {
                                     MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
@@ -115,6 +136,7 @@ fun WakeChatScreen(viewModel: WakeChatViewModel = viewModel()) {
                     }
                 }
             }
+            )
         }
-    )
+}
 }

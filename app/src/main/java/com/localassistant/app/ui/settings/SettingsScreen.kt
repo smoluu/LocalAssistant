@@ -257,11 +257,11 @@ fun SettingsScreen(onNavigateBack: () -> Unit, viewModel: SettingsViewModel = vi
                     "Chat Template Arguments",
                     settings.llmChatTemplateKwargs,
                     { viewModel.updateSetting("llmChatTemplateKwargs", it) },
-                    "e.g. enable_thinking=false",
+                    "e.g. enable_thinking=false, reasoning_effort=low",
                     maxLines = 4
                 )
                 Text(
-                    text = "Max Tokens is the whole reply budget: a thinking model spends it on reasoning first, so a value that is too small answers with an empty message. The reasoning budget caps only the thinking; leave it at 0 when the server has no such control. Chat template arguments are sent as the server's chat_template_kwargs object - one key=value per line, for example enable_thinking=false to turn thinking off entirely, reasoning_effort=low for a shorter chain of thought, or preserve_thinking=true to keep earlier reasoning. Leave it empty for servers that take none.",
+                    text = "Max Tokens is the whole reply budget: a thinking model spends it on reasoning first, so a value that is too small answers with an empty message. The reasoning budget caps only the thinking; leave it at 0 when the server has no such control. Chat template arguments are sent as the server's chat_template_kwargs object - separate them with commas, for example enable_thinking=false, reasoning_effort=low, preserve_thinking=true. Leave it empty for servers that take none.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -379,6 +379,33 @@ fun SettingsScreen(onNavigateBack: () -> Unit, viewModel: SettingsViewModel = vi
                 Spacer(modifier = Modifier.height(8.dp))
                 SettingSwitch("Wake Word Detection", settings.enableWakeWordDetection, { viewModel.updateSetting("enableWakeWordDetection", it) })
                 TestButton("Test Wake Word", true, wakeWordTesting) { viewModel.runWakeWordTest() }
+            }
+
+            SettingsSection("Wake Word Chat", "🗗", "How long an exchange stays open once the phrase is heard") {
+                Text(
+                    text = "The reply window is how long you get to say the request after the wake phrase matches - nothing heard inside it ends the exchange instead of holding the microphone open. The close timeout is how long the card stays on screen after the last thing happened on it: streamed text, a spoken reply and tapping the card all restart that clock, so a reply that is still working is never taken away. Tapping the area above the card closes it, and its history is dropped either way - a wake chat holds one exchange, never a log.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                SettingNumberField(
+                    "Reply Window (seconds)",
+                    settings.wakeReplySeconds,
+                    { viewModel.updateSetting("wakeReplySeconds", it) },
+                    "Time to say the request"
+                )
+                SettingNumberField(
+                    "Chat Close Timeout (seconds)",
+                    settings.wakeChatCloseSeconds,
+                    { viewModel.updateSetting("wakeChatCloseSeconds", it) },
+                    "How long an idle card stays open"
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = { viewModel.triggerWakeChat() },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                ) { Text("Trigger An Exchange") }
+                EndpointStatusLine(wakeWordStatus, wakeWordTesting)
             }
 
             SettingsSection("Default Digital Assistant", "🎙️", "Let the system host the wake chat over any screen") {

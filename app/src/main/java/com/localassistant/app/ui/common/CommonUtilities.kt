@@ -113,10 +113,20 @@ fun recordAudioForSTT(
  * utterance plus a short margin. Callers must treat "no speech" as "nothing
  * happened": a clip of a quiet room is not an utterance, and enrolling it as a
  * wake-word reference would describe the room instead of the phrase.
+ *
+ * The three windows are separate on purpose. `maxSeconds` is the hard cap that
+ * bounds memory; `silenceThresholdMs` ends a clip once speech has been heard,
+ * which is what trims an utterance; and `noSpeechTimeoutMs` gives up when *nothing*
+ * has been heard, which is the window the user answers into after the wake
+ * phrase - a request that starts late must not be cut off, so it is only the
+ * silence-only case that ends early.
  */
 fun recordAudioWithVAD(
     context: Context,
-    stopSignal: java.util.concurrent.atomic.AtomicBoolean
+    stopSignal: java.util.concurrent.atomic.AtomicBoolean,
+    maxSeconds: Int = 60,
+    silenceThresholdMs: Long = 1000L,
+    noSpeechTimeoutMs: Long = 0L
 ): ByteArray? {
     val sampleRate = 16000
     val channelConfig = AudioFormat.CHANNEL_IN_MONO
@@ -148,8 +158,8 @@ fun recordAudioWithVAD(
     // can be cut to the utterance itself.
     var firstSpeechSample = -1
     var lastSpeechSample = -1
-    val silenceThresholdMs = 1000L // Stop after 1s of silence once speech detected
     val minEnergy = 800 // Higher threshold to avoid background noise
+    val recordingStart = System.currentTimeMillis()
 
     android.util.Log.d("VAD", "Starting recording with energy threshold $minEnergy...")
 
@@ -157,11 +167,19 @@ fun recordAudioWithVAD(
         audioRecord.startRecording()
 
         var chunkCount = 0
-        // Each iteration consumes buffer.size samples, so the 60 s cap has to be
+        // Each iteration consumes buffer.size samples, so the cap has to be
         // counted in iterations - counting samples would allow hours of silence.
-        val maxIterations = sampleRate * 60 / buffer.size
+        val maxIterations = sampleRate * maxSeconds / buffer.size
 
         while (chunkCount < maxIterations && !stopSignal.get()) {
+            if (noSpeechTimeoutMs > 0 && !speechDetected &&
+                System.currentTimeMillis() - recordingStart > noSpeechTimeoutMs) {
+                // Nothing was heard within the window the caller allows, so this
+                // is silence, not a late utterance - the caller decides what to
+                // say about it.
+                android.util.Log.d("VAD", "No speech within ${noSpeechTimeoutMs}ms, giving up")
+                break
+            }
             val bytesRead = audioRecord.read(buffer, 0, buffer.size)
 
             if (bytesRead < 0) {

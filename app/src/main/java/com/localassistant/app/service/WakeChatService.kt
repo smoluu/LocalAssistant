@@ -60,6 +60,13 @@ class WakeChatService : VoiceInteractionService() {
         // the same one the manifest declares, so a platform that hosts hands-free
         // conversations can open this service without the app being involved.
         const val ACTION_VOICE_INTERACTION = "android.service.voice.VoiceInteractionService"
+        // Closing an open chat from outside the app (the system, or a stale intent
+        // left in the queue). The app's own overlay closes it through closeChat()
+        // directly, since the UI and the service share this process.
+        const val ACTION_CLOSE_CHAT = "com.localassistant.CLOSE_WAKE_CHAT"
+        // Runs one exchange without waiting for the wake phrase, so the pipeline
+        // can be exercised from Settings.
+        const val ACTION_TRIGGER_EXCHANGE = "com.localassistant.TRIGGER_WAKE_CHAT"
 
         // Phases the overlay shows
         const val PHASE_IDLE = "idle"
@@ -73,8 +80,9 @@ class WakeChatService : VoiceInteractionService() {
         private const val MAX_LLM_CONTEXT = 20
         // How long the "nothing is enrolled yet" hint stays on the overlay.
         private const val REFERENCE_HINT_MS = 3000L
-        // How long the overlay stays up after an exchange before it slides away.
-        private const val OVERLAY_HIDE_MS = 1500L
+        // How often the idle-close watchdog re-reads the activity stamp. The
+        // length of the wait itself is the user's setting, never a constant.
+        private const val TOUCH_POLL_MS = 200L
 
         /**
          * Build an intent for this service with the given action.
@@ -95,11 +103,44 @@ class WakeChatService : VoiceInteractionService() {
         private val _overlay = MutableStateFlow(false)
         private val _phase = MutableStateFlow(PHASE_IDLE)
         private val _statusMessage = MutableStateFlow("")
+        // When the chat last saw activity. The idle-close watchdog compares this
+        // against the configured close timeout, so anything that counts as
+        // activity - a streamed token, a spoken reply, the user tapping the card
+        // - only has to move this stamp to keep the chat open.
+        private val _lastActivity = MutableStateFlow(System.currentTimeMillis())
 
         val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
         val overlay: StateFlow<Boolean> = _overlay.asStateFlow()
         val phase: StateFlow<String> = _phase.asStateFlow()
         val statusMessage: StateFlow<String> = _statusMessage.asStateFlow()
+
+        /**
+         * Record that the open chat saw activity, so the close timer restarts.
+         *
+         * Both halves of the pipeline call this - the service at every stage and
+         * the overlay when the user touches it - because the timer belongs to the
+         * exchange, not to whichever of the two is running.
+         */
+        fun touchChat() {
+            _lastActivity.value = System.currentTimeMillis()
+        }
+
+        /**
+         * Close the chat: the exchange is over, so its history is dropped and the
+         * card slides away.
+         *
+         * A wake chat holds one conversation, not a log - nothing here is
+         * persisted, and the next wake phrase starts an empty card. The history
+         * only ever lives as long as the chat is open, which is what lets the
+         * LLM keep the turns of an exchange as context without the app becoming
+         * a second conversation history the user never sees.
+         */
+        fun closeChat() {
+            _messages.value = emptyList()
+            _overlay.value = false
+            _phase.value = PHASE_DETECTING
+            _lastActivity.value = System.currentTimeMillis()
+        }
     }
 
     // The app's context - the recording and settings helpers expect an
@@ -116,6 +157,11 @@ class WakeChatService : VoiceInteractionService() {
 
     @Volatile
     private var listening = false
+
+    // Set by Settings to run one exchange without the wake match; the loop reads
+    // and clears it, so a trigger can never repeat itself.
+    @Volatile
+    private var manualTrigger = false
 
     // Coroutine scope for the listening loop. cancel() permanently finishes a
     // scope, so stopListening() replaces it with a fresh one before the next start.
@@ -142,6 +188,8 @@ class WakeChatService : VoiceInteractionService() {
             // "listen", and startListening() is idempotent so the two cannot stack.
             ACTION_START, ACTION_VOICE_INTERACTION -> startListening()
             ACTION_STOP -> stopListening()
+            ACTION_CLOSE_CHAT -> closeChat()
+            ACTION_TRIGGER_EXCHANGE -> triggerExchange()
         }
 
         return START_STICKY
@@ -266,18 +314,35 @@ class WakeChatService : VoiceInteractionService() {
     private fun stopListening() {
         listening = false
         stopSignal.set(true)
-        _overlay.value = false
+        // Stopping the service closes the chat, so its history goes with it -
+        // a wake chat never carries a conversation into the next exchange.
+        closeChat()
         _phase.value = PHASE_IDLE
-        _statusMessage.value = ""
         serviceScope = newServiceScope()
     }
 
     /**
+     * Run the next exchange without waiting for the wake phrase.
+     *
+     * The debug path for the whole pipeline - record the request, transcribe, ask
+     * the LLM, speak the reply - so a user testing endpoints never has to get the
+     * wake word recognised first. The loop clears the flag as it reads it, so one
+     * trigger means one exchange.
+     */
+    fun triggerExchange() {
+        if (!listening) startListening()
+        manualTrigger = true
+    }
+
+    /**
      * Raises the overlay, with an optional line to show on it.
+     *
+     * Raising the card is itself activity, so it stamps the close clock.
      */
     private fun showOverlay(message: String) {
         _overlay.value = true
         _statusMessage.value = message
+        touchChat()
     }
 
     /**
@@ -289,40 +354,81 @@ class WakeChatService : VoiceInteractionService() {
         _phase.value = PHASE_DETECTING
     }
 
+    /**
+     * Hold the open chat until it has been idle for as long as the user allows,
+     * then close it and its history.
+     *
+     * Every stage of an exchange stamps the activity clock - each streamed token,
+     * the spoken reply, and the user tapping the card from the overlay - so a
+     * reply that is still working, or a user still reading one, never has the
+     * card taken away. Only genuine silence ends an exchange.
+     */
+    private suspend fun holdChatOpen(
+        currentSettings: com.localassistant.app.domain.model.AppSettings
+    ) {
+        val closeMs = currentSettings.wakeChatCloseSeconds.coerceIn(1, 300) * 1000L
+        while (true) {
+            delay(TOUCH_POLL_MS)
+            // Stopping the service has already closed the chat, so the hold only
+            // has to let go of it.
+            if (!listening) break
+            if (System.currentTimeMillis() - _lastActivity.value >= closeMs) break
+        }
+        closeChat()
+    }
+
+    /**
+     * Listen for the wake phrase and answer whether it was heard.
+     *
+     * Silence, missing enrollment and a poor match all answer false and leave the
+     * loop listening: only a clip that matches the enrolled references starts an
+     * exchange, and the wake clip itself is never transcribed.
+     */
+    private suspend fun waitForWake(
+        currentSettings: com.localassistant.app.domain.model.AppSettings
+    ): Boolean {
+        val clip = withContext(Dispatchers.IO) {
+            recordAudioWithVAD(appContext, stopSignal)
+        }
+        if (!listening) return false
+
+        if (clip == null || clip.isEmpty()) {
+            // The recorder answers with nothing when no speech was heard, which
+            // is the common case while the app simply listens. Silence must never
+            // raise the overlay or report an error.
+            _statusMessage.value = ""
+            _phase.value = PHASE_DETECTING
+            return false
+        }
+
+        val references = loadWakeReferences(appContext)
+        if (references.isEmpty()) {
+            // Nothing can match yet, so this is the one case worth showing.
+            val hint = "No wake-word references recorded - open Settings and speak the phrase"
+            showOverlay(hint)
+            updateNotification(hint)
+            delay(REFERENCE_HINT_MS)
+            hideOverlay()
+            return false
+        }
+
+        val features = extractWakeFeatures(clip)
+        val cost = bestMatchCost(features, references)
+        if (features.isEmpty() || cost > wakeCostThreshold(currentSettings.wakeWordSensitivity, references)) {
+            _phase.value = PHASE_DETECTING
+            return false
+        }
+        return true
+    }
+
     private suspend fun wakeLoop() {
         while (listening) {
-            val clip = withContext(Dispatchers.IO) {
-                recordAudioWithVAD(appContext, stopSignal)
-            }
-            if (!listening) break
-
             val currentSettings = settingsRepository.settingsFlow.value
-            if (clip == null || clip.isEmpty()) {
-                // The recorder answers with nothing when no speech was heard, which
-                // is the common case while the app simply listens. Silence must never
-                // raise the overlay or report an error.
-                _statusMessage.value = ""
-                _phase.value = PHASE_DETECTING
-                continue
-            }
-
-            val references = loadWakeReferences(appContext)
-            if (references.isEmpty()) {
-                // Nothing can match yet, so this is the one case worth showing.
-                val hint = "No wake-word references recorded - open Settings and speak the phrase"
-                showOverlay(hint)
-                updateNotification(hint)
-                delay(REFERENCE_HINT_MS)
-                hideOverlay()
-                continue
-            }
-
-            val features = extractWakeFeatures(clip)
-            val cost = bestMatchCost(features, references)
-            if (features.isEmpty() || cost > wakeCostThreshold(currentSettings.wakeWordSensitivity, references)) {
-                _phase.value = PHASE_DETECTING
-                continue
-            }
+            // A manual trigger from Settings runs the exchange without the wake
+            // match, so the pipeline can be exercised on demand.
+            val forced = manualTrigger
+            manualTrigger = false
+            if (!forced && !waitForWake(currentSettings)) continue
 
             // The wake clip is never transcribed: the phrase has already been
             // recognised on-device, so sending it to STT would put the wake word in
@@ -333,8 +439,20 @@ class WakeChatService : VoiceInteractionService() {
             updateNotification(getPhaseText(PHASE_LISTENING))
             playWakeCue()
 
+            // The reply window is the user's setting: enough time to say the
+            // request, and nothing heard within it ends the exchange instead of
+            // holding the microphone open for a minute. The silence that *ends*
+            // an utterance stays the configured VAD behaviour, so a request that
+            // begins late is still recorded in full.
             val requestClip = withContext(Dispatchers.IO) {
-                recordAudioWithVAD(appContext, stopSignal)
+                recordAudioWithVAD(
+                    context = appContext,
+                    stopSignal = stopSignal,
+                    silenceThresholdMs = currentSettings.vadMinSilenceDurationMs
+                        .coerceIn(200, 5000).toLong(),
+                    noSpeechTimeoutMs = currentSettings.wakeReplySeconds
+                        .coerceIn(1, 300) * 1000L
+                )
             }
             if (!listening) break
             val request = if (requestClip == null || requestClip.isEmpty()) {
@@ -349,8 +467,9 @@ class WakeChatService : VoiceInteractionService() {
             if (request.isBlank()) {
                 _statusMessage.value = "Could not hear the request"
                 updateNotification("Could not hear the request")
-                delay(OVERLAY_HIDE_MS)
-                hideOverlay()
+                // The card stays up for the configured window so the user can read
+                // why nothing was heard, then closes with its history.
+                holdChatOpen(currentSettings)
                 continue
             }
 
@@ -374,6 +493,7 @@ class WakeChatService : VoiceInteractionService() {
             current + listOf(ChatMessage.user(request))
         }
         _phase.value = PHASE_THINKING
+        touchChat()
 
         val reply = complete(currentSettings, request)
         if (reply.isNotBlank()) {
@@ -388,6 +508,10 @@ class WakeChatService : VoiceInteractionService() {
             // they listen.
             requestSession(request, reply)
             _phase.value = PHASE_SPEAKING
+            // Speaking the reply is activity right up to its last syllable, so
+            // the close clock is stamped before it starts and the hold below
+            // never cuts the audio.
+            touchChat()
             playTTSAudio(
                 text = reply,
                 ttsSettings = Pair(
@@ -401,8 +525,9 @@ class WakeChatService : VoiceInteractionService() {
                 timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
             )
         }
-        delay(OVERLAY_HIDE_MS)
-        hideOverlay()
+        // The chat stays open while anything on it is alive and closes itself once
+        // it has been idle for the configured window.
+        holdChatOpen(currentSettings)
     }
 
     /**
@@ -482,6 +607,10 @@ class WakeChatService : VoiceInteractionService() {
                 reasoningBudgetTokens = currentSettings.llmReasoningBudgetTokens,
                 chatTemplateKwargs = currentSettings.llmChatTemplateKwargs,
                 systemPrompt = currentSettings.systemPrompt,
+                // Text arriving on the stream is activity on the chat, so the
+                // close clock follows the answer as it is written rather than
+                // waiting for it to finish.
+                onChunk = { touchChat() },
                 timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
             ).content
         } catch (e: Exception) {

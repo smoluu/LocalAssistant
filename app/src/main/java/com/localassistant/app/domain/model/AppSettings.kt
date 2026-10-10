@@ -17,8 +17,8 @@ data class AppSettings(
     // How much of that budget the model may spend thinking. 0 omits the
     // parameter entirely, which is what a server without reasoning control needs.
     val llmReasoningBudgetTokens: Int = 512,
-    // Extra chat-template arguments, one "key=value" per line, e.g.
-    // "enable_thinking=false" or "reasoning_effort=low". Empty sends none.
+    // Extra chat-template arguments, separated by commas, e.g.
+    // "enable_thinking=false, reasoning_effort=low". Empty sends none.
     val llmChatTemplateKwargs: String = "",
 
     // STT Configuration
@@ -44,6 +44,14 @@ data class AppSettings(
     val wakeWordName: String = "hey assistant",
     val wakeWordSensitivity: Float = 0.5f,
     val enableWakeWordDetection: Boolean = true,
+    // How long the app waits for the request once the wake phrase has matched.
+    // Nothing heard within this window ends the exchange instead of holding the
+    // microphone open for a minute.
+    val wakeReplySeconds: Int = 5,
+    // How long the wake chat stays open after the last activity on it. Streaming
+    // text, spoken replies and the user touching the card all reset that clock,
+    // so an exchange that is still working never closes in front of the user.
+    val wakeChatCloseSeconds: Int = 5,
     
     // Voice Activity Detection
     val vadSensitivity: Float = 0.4f,

@@ -43,6 +43,23 @@ class WakeChatViewModel(application: android.app.Application) : AndroidViewModel
         send(WakeChatService.ACTION_STOP)
     }
 
+    /**
+     * Keep the open exchange alive: the service closes it only once nothing has
+     * happened on it for [WakeChatService] `wakeChatCloseSeconds`, so any touch
+     * of the card restamps that clock.
+     */
+    fun touchChat() {
+        WakeChatService.touchChat()
+    }
+
+    /**
+     * End the exchange and drop its history. The card is a single exchange, never
+     * a running log: closing it clears the messages, so the next one starts empty.
+     */
+    fun closeChat() {
+        WakeChatService.closeChat()
+    }
+
     private fun send(action: String) {
         val intent = WakeChatService.buildIntent(context, action)
         // A foreground service is the only way to keep the microphone loop alive

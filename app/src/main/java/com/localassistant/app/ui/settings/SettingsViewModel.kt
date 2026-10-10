@@ -19,6 +19,7 @@ import com.localassistant.app.ui.common.saveWakeReference
 import com.localassistant.app.ui.common.wakeCostThreshold
 import com.localassistant.app.ui.common.assistantSettingsIntents
 import com.localassistant.app.ui.common.isDefaultAssistantHeld
+import com.localassistant.app.service.WakeChatService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -104,6 +105,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             "wakeWordName" -> _settings.update { it.copy(wakeWordName = value as String) }
             "wakeWordSensitivity" -> _settings.update { it.copy(wakeWordSensitivity = value as Float) }
             "enableWakeWordDetection" -> _settings.update { it.copy(enableWakeWordDetection = value as Boolean) }
+            "wakeReplySeconds" -> _settings.update { it.copy(wakeReplySeconds = (value as Int).coerceIn(1, 300)) }
+            "wakeChatCloseSeconds" -> _settings.update { it.copy(wakeChatCloseSeconds = (value as Int).coerceIn(1, 300)) }
 
             "vadSensitivity" -> _settings.update { it.copy(vadSensitivity = value as Float) }
             "vadMinSilenceDurationMs" -> _settings.update { it.copy(vadMinSilenceDurationMs = value as Int) }
@@ -623,6 +626,28 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         clearWakeReferences(appContext)
         _wakeReferenceCount.value = 0
         _wakeWordStatus.value = null
+    }
+
+    /**
+     * Starts one exchange without waiting for the wake phrase.
+     *
+     * The debug path for the rest of the pipeline - record the request,
+     * transcribe it, ask the LLM, speak the reply - so an endpoint can be
+     * exercised without the wake phrase being recognised first. The exchange
+     * itself is carried by the service, so this only reports that the request
+     * reached it: the overlay and the persistent notification carry the rest.
+     */
+    fun triggerWakeChat() {
+        _wakeWordStatus.value = try {
+            val intent = WakeChatService.buildIntent(appContext, WakeChatService.ACTION_TRIGGER_EXCHANGE)
+            appContext.startForegroundService(intent)
+            EndpointStatus(
+                true,
+                "Exchange started - the card raises and the reply follows on the notification",
+            )
+        } catch (e: Exception) {
+            EndpointStatus(false, describeFailure(e))
+        }
     }
 
     /**

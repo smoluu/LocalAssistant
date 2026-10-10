@@ -69,6 +69,8 @@ class SettingsRepository(private val context: Context) {
             wakeWordName = sharedPreferences.getString("wake_word_name", defaults.wakeWordName) ?: defaults.wakeWordName,
             wakeWordSensitivity = sharedPreferences.getFloat("wake_word_sensitivity", defaults.wakeWordSensitivity),
             enableWakeWordDetection = sharedPreferences.getBoolean("enable_wake_word", defaults.enableWakeWordDetection),
+            wakeReplySeconds = sharedPreferences.getInt("wake_reply_seconds", defaults.wakeReplySeconds),
+            wakeChatCloseSeconds = sharedPreferences.getInt("wake_chat_close_seconds", defaults.wakeChatCloseSeconds),
 
             vadSensitivity = sharedPreferences.getFloat("vad_sensitivity", defaults.vadSensitivity),
             vadMinSilenceDurationMs = sharedPreferences.getInt("vad_min_silence_ms", defaults.vadMinSilenceDurationMs),
@@ -120,6 +122,8 @@ class SettingsRepository(private val context: Context) {
             putString("wake_word_name", settings.wakeWordName)
             putFloat("wake_word_sensitivity", settings.wakeWordSensitivity)
             putBoolean("enable_wake_word", settings.enableWakeWordDetection)
+            putInt("wake_reply_seconds", settings.wakeReplySeconds)
+            putInt("wake_chat_close_seconds", settings.wakeChatCloseSeconds)
             
             putFloat("vad_sensitivity", settings.vadSensitivity)
             putInt("vad_min_silence_ms", settings.vadMinSilenceDurationMs)
@@ -242,6 +246,8 @@ class SettingsRepository(private val context: Context) {
         appendStr(sb, "wakeWordName", settings.wakeWordName)
         appendBool(sb, "enableWakeWordDetection", settings.enableWakeWordDetection)
         appendNum(sb, "wakeWordSensitivity", settings.wakeWordSensitivity)
+        appendNum(sb, "wakeReplySeconds", settings.wakeReplySeconds)
+        appendNum(sb, "wakeChatCloseSeconds", settings.wakeChatCloseSeconds)
         appendNum(sb, "vadSensitivity", settings.vadSensitivity)
         appendNum(sb, "vadMinSilenceDurationMs", settings.vadMinSilenceDurationMs)
         appendBool(sb, "continuousConversationMode", settings.continuousConversationMode)
@@ -333,6 +339,8 @@ class SettingsRepository(private val context: Context) {
                 wakeWordName = extract("wakeWordName", base.wakeWordName),
                 enableWakeWordDetection = extractBool("enableWakeWordDetection", base.enableWakeWordDetection),
                 wakeWordSensitivity = extractNum("wakeWordSensitivity", base.wakeWordSensitivity.toDouble()).toFloat(),
+                wakeReplySeconds = extractNum("wakeReplySeconds", base.wakeReplySeconds.toDouble()).toInt(),
+                wakeChatCloseSeconds = extractNum("wakeChatCloseSeconds", base.wakeChatCloseSeconds.toDouble()).toInt(),
                 vadSensitivity = extractNum("vadSensitivity", base.vadSensitivity.toDouble()).toFloat(),
                 vadMinSilenceDurationMs = extractNum("vadMinSilenceDurationMs", base.vadMinSilenceDurationMs.toDouble()).toInt(),
                 continuousConversationMode = extractBool("continuousConversationMode", base.continuousConversationMode),
