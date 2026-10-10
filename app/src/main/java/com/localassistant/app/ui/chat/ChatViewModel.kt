@@ -124,6 +124,9 @@ class ChatViewModel(application: android.app.Application) : AndroidViewModel(app
                     messages = messagesList,
                     model = model,
                     stream = true,
+                    maxTokens = settings.value.llmMaxTokens,
+                    reasoningBudgetTokens = settings.value.llmReasoningBudgetTokens,
+                    chatTemplateKwargs = settings.value.llmChatTemplateKwargs,
                     systemPrompt = settings.value.systemPrompt,
                     timeoutSeconds = settings.value.httpTimeoutSeconds.toLong()
                 ) { chunk: String ->

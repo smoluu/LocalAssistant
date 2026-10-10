@@ -478,6 +478,9 @@ class WakeChatService : VoiceInteractionService() {
                 apiKey = if (currentSettings.llmApiKey.isBlank()) null else currentSettings.llmApiKey,
                 messages = history,
                 model = currentSettings.llmModelName,
+                maxTokens = currentSettings.llmMaxTokens,
+                reasoningBudgetTokens = currentSettings.llmReasoningBudgetTokens,
+                chatTemplateKwargs = currentSettings.llmChatTemplateKwargs,
                 systemPrompt = currentSettings.systemPrompt,
                 timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
             ).content

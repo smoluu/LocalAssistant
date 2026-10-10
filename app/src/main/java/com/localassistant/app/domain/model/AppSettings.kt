@@ -10,6 +10,16 @@ data class AppSettings(
     val llmBaseUrl: String = "http://192.168.69.200:8086/v1",
     val llmModelName: String = "/models/Qwen3.5-4B-Q4_K_M.gguf",
     val llmApiKey: String = "",
+    // Generation budget. A reasoning model spends its tokens on the chain of
+    // thought first, so max_tokens must cover both the reasoning and the answer
+    // or the reply comes back empty.
+    val llmMaxTokens: Int = 1024,
+    // How much of that budget the model may spend thinking. 0 omits the
+    // parameter entirely, which is what a server without reasoning control needs.
+    val llmReasoningBudgetTokens: Int = 512,
+    // Extra chat-template arguments, one "key=value" per line, e.g.
+    // "enable_thinking=false" or "reasoning_effort=low". Empty sends none.
+    val llmChatTemplateKwargs: String = "",
 
     // STT Configuration
     val sttBaseUrl: String = "http://192.168.69.200:8089/v1",

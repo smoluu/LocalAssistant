@@ -58,6 +58,34 @@ fun SettingTextField(
     }
 }
 
+/**
+ * A whole-number setting. The field only accepts digits, so a value that is not
+ * a number never reaches the ViewModel - an empty field falls back to the
+ * default the caller passes.
+ */
+@Composable
+fun SettingNumberField(
+    label: String,
+    value: Int,
+    onValueChange: (Int) -> Unit,
+    placeholder: String,
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Text(text = label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(vertical = 4.dp))
+        OutlinedTextField(
+            modifier = Modifier.fillMaxWidth(),
+            value = value.toString(),
+            onValueChange = { entered ->
+                val parsed = entered.trim().toIntOrNull()
+                if (parsed != null) onValueChange(parsed)
+            },
+            placeholder = { Text(placeholder) },
+            maxLines = 1,
+            shape = RoundedCornerShape(8.dp)
+        )
+    }
+}
+
 @Composable
 fun SettingSwitch(label: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -213,6 +241,30 @@ fun SettingsScreen(onNavigateBack: () -> Unit, viewModel: SettingsViewModel = vi
                 SettingTextField("Model Name", settings.llmModelName, { viewModel.updateSetting("llmModelName", it) }, "llama-3.1-8b-instruct")
                 EndpointChoices("Available models", llmModels, settings.llmModelName) { viewModel.updateSetting("llmModelName", it) }
                 SettingTextField("API Key (optional)", settings.llmApiKey, { viewModel.updateSetting("llmApiKey", it) }, "Leave empty if not required")
+                SettingNumberField(
+                    "Max Tokens",
+                    settings.llmMaxTokens,
+                    { viewModel.updateSetting("llmMaxTokens", it) },
+                    "Total reply budget, thinking included"
+                )
+                SettingNumberField(
+                    "Reasoning Budget (tokens)",
+                    settings.llmReasoningBudgetTokens,
+                    { viewModel.updateSetting("llmReasoningBudgetTokens", it) },
+                    "0 leaves the server decide"
+                )
+                SettingTextField(
+                    "Chat Template Arguments",
+                    settings.llmChatTemplateKwargs,
+                    { viewModel.updateSetting("llmChatTemplateKwargs", it) },
+                    "e.g. enable_thinking=false",
+                    maxLines = 4
+                )
+                Text(
+                    text = "Max Tokens is the whole reply budget: a thinking model spends it on reasoning first, so a value that is too small answers with an empty message. The reasoning budget caps only the thinking; leave it at 0 when the server has no such control. Chat template arguments are sent as the server's chat_template_kwargs object - one key=value per line, for example enable_thinking=false to turn thinking off entirely, reasoning_effort=low for a shorter chain of thought, or preserve_thinking=true to keep earlier reasoning. Leave it empty for servers that take none.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 SettingSwitch("Auto-expand Reasoning", settings.autoExpandReasoning, { viewModel.updateSetting("autoExpandReasoning", it) })
                 SettingTextField(
                     "System Prompt",

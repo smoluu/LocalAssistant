@@ -46,6 +46,9 @@ class SettingsRepository(private val context: Context) {
             llmBaseUrl = sharedPreferences.getString("llm_base_url", defaults.llmBaseUrl) ?: defaults.llmBaseUrl,
             llmModelName = sharedPreferences.getString("llm_model_name", defaults.llmModelName) ?: defaults.llmModelName,
             llmApiKey = sharedPreferences.getString("llm_api_key", defaults.llmApiKey) ?: defaults.llmApiKey,
+            llmMaxTokens = sharedPreferences.getInt("llm_max_tokens", defaults.llmMaxTokens),
+            llmReasoningBudgetTokens = sharedPreferences.getInt("llm_reasoning_budget_tokens", defaults.llmReasoningBudgetTokens),
+            llmChatTemplateKwargs = sharedPreferences.getString("llm_chat_template_kwargs", defaults.llmChatTemplateKwargs) ?: defaults.llmChatTemplateKwargs,
 
             sttBaseUrl = sharedPreferences.getString("stt_base_url", defaults.sttBaseUrl) ?: defaults.sttBaseUrl,
             sttModelName = sharedPreferences.getString("stt_model_name", defaults.sttModelName) ?: defaults.sttModelName,
@@ -94,6 +97,9 @@ class SettingsRepository(private val context: Context) {
             putString("llm_base_url", settings.llmBaseUrl)
             putString("llm_model_name", settings.llmModelName)
             putString("llm_api_key", settings.llmApiKey)
+            putInt("llm_max_tokens", settings.llmMaxTokens)
+            putInt("llm_reasoning_budget_tokens", settings.llmReasoningBudgetTokens)
+            putString("llm_chat_template_kwargs", settings.llmChatTemplateKwargs)
             
             putString("stt_base_url", settings.sttBaseUrl)
             putString("stt_model_name", settings.sttModelName)
@@ -220,6 +226,9 @@ class SettingsRepository(private val context: Context) {
         appendStr(sb, "llmBaseUrl", settings.llmBaseUrl)
         appendStr(sb, "llmModelName", settings.llmModelName)
         appendStr(sb, "llmApiKey", settings.llmApiKey)
+        appendNum(sb, "llmMaxTokens", settings.llmMaxTokens)
+        appendNum(sb, "llmReasoningBudgetTokens", settings.llmReasoningBudgetTokens)
+        appendStr(sb, "llmChatTemplateKwargs", settings.llmChatTemplateKwargs)
         appendStr(sb, "sttBaseUrl", settings.sttBaseUrl)
         appendStr(sb, "sttModelName", settings.sttModelName)
         appendStr(sb, "sttApiKey", settings.sttApiKey)
@@ -308,6 +317,9 @@ class SettingsRepository(private val context: Context) {
                 llmBaseUrl = extract("llmBaseUrl", base.llmBaseUrl),
                 llmModelName = extract("llmModelName", base.llmModelName),
                 llmApiKey = extract("llmApiKey", base.llmApiKey),
+                llmMaxTokens = extractNum("llmMaxTokens", base.llmMaxTokens.toDouble()).toInt(),
+                llmReasoningBudgetTokens = extractNum("llmReasoningBudgetTokens", base.llmReasoningBudgetTokens.toDouble()).toInt(),
+                llmChatTemplateKwargs = extract("llmChatTemplateKwargs", base.llmChatTemplateKwargs),
                 sttBaseUrl = extract("sttBaseUrl", base.sttBaseUrl),
                 sttModelName = extract("sttModelName", base.sttModelName),
                 sttApiKey = extract("sttApiKey", base.sttApiKey),

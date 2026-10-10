@@ -409,6 +409,9 @@ fun ChatScreen(
                                                     messages = history,
                                                     model = settings.llmModelName,
                                                     stream = true,
+                                                    maxTokens = settings.llmMaxTokens,
+                                                    reasoningBudgetTokens = settings.llmReasoningBudgetTokens,
+                                                    chatTemplateKwargs = settings.llmChatTemplateKwargs,
                                                     systemPrompt = settings.systemPrompt,
                                                     timeoutSeconds = settings.httpTimeoutSeconds.toLong()
                                                 ) { chunk: String ->

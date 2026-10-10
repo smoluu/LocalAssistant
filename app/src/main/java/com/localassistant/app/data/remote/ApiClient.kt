@@ -71,19 +71,32 @@ object ApiClient {
         maxTokens: Int = 4096,
         stream: Boolean = true,
         systemPrompt: String = "",
+        reasoningBudgetTokens: Int = 0,
+        chatTemplateKwargs: String = "",
         timeoutSeconds: Long = DEFAULT_TIMEOUT,
         onChunk: ((String) -> Unit)? = null
     ): ChatResponse {
         android.util.Log.d("ApiClient", "chatCompletion called, stream=$stream")
         val client = createClient(baseUrl, apiKey, timeoutSeconds)
-        
+
         var cleanUrl = baseUrl.trimEnd('/')
         if (cleanUrl.endsWith("/chat/completions")) {
             cleanUrl = cleanUrl.substring(0, cleanUrl.lastIndexOf("/chat/completions")).trimEnd('/')
         }
-        
+
         val requestMessages = if (systemPrompt.isBlank()) messages
         else listOf(mapOf("role" to "system", "content" to systemPrompt)) + messages
+
+        // Optional generation controls are appended only when the user set them,
+        // so a server that knows nothing about reasoning keeps receiving the plain
+        // request it accepted before.
+        val optionalParams = StringBuilder()
+        if (reasoningBudgetTokens > 0) {
+            optionalParams.append(",\"reasoning_budget_tokens\": $reasoningBudgetTokens")
+        }
+        buildChatTemplateKwargsJson(chatTemplateKwargs)?.let { kwargs ->
+            optionalParams.append(",\"chat_template_kwargs\": $kwargs")
+        }
 
         val jsonBody = """{
             "model": ${escapeJsonString(model)},
@@ -91,7 +104,7 @@ object ApiClient {
             "temperature": $temperature,
             "max_tokens": $maxTokens,
             "stream": $stream
-        }""".trimIndent()
+        }$optionalParams""".trimIndent()
         
         val requestBody = jsonBody.toRequestBody("application/json".toMediaType())
         
@@ -311,6 +324,75 @@ object ApiClient {
             """{"role": "${msg["role"]}", "content": ${escapeJsonString(msg["content"] ?: "")}}"""
         }
         return "[$jsonList]"
+    }
+
+    /**
+     * Turn the user's chat-template arguments into the JSON object a server
+     * expects under "chat_template_kwargs".
+     *
+     * The settings field is typed on a phone, so the accepted spelling is the
+     * friendlier one: one "key=value" per line - or separated by commas - with
+     * "true"/"false", numbers, and bare words as strings. A value in quotes is
+     * taken verbatim. Anything that is not a well-formed pair is skipped rather
+     * than sent, because a half-typed argument would otherwise break every
+     * request the app makes.
+     *
+     * Returns null when nothing was entered, so the request body stays exactly as
+     * a server without chat-template control expects it.
+     */
+    fun buildChatTemplateKwargsJson(spec: String): String? {
+        val pairs = spec.replace(",", "\n").split("\n")
+            .map { it.trim() }
+            .filterNot { it.isBlank() || it.startsWith("#") }
+            .mapNotNull { entry ->
+                val separator = entry.indexOf('=')
+                if (separator < 0) return@mapNotNull null
+                val key = entry.substring(0, separator).trim()
+                val value = entry.substring(separator + 1).trim()
+                if (!isTemplateKey(key) || value.isEmpty()) return@mapNotNull null
+                "${escapeJsonString(key)}:${jsonValueOfKeyword(value)}"
+            }
+        if (pairs.isEmpty()) return null
+        return "{${pairs.joinToString(",")}}"
+    }
+
+    private fun jsonValueOfKeyword(value: String): String {
+        val unquoted = if (value.length >= 2 &&
+                ((value.first() == '"' && value.last() == '"') || (value.first() == '\'' && value.last() == '\''))) {
+            value.substring(1, value.length - 1)
+        } else value
+        return when {
+            unquoted.equals("true", ignoreCase = true) -> "true"
+            unquoted.equals("false", ignoreCase = true) -> "false"
+            isNumberLiteral(unquoted) -> unquoted
+            else -> escapeJsonString(unquoted)
+        }
+    }
+
+    /**
+     * A chat-template key is a bare identifier - the names servers accept
+     * ("enable_thinking", "reasoning_effort") - and nothing else, so a half-typed
+     * line can never inject stray JSON.
+     */
+    private fun isTemplateKey(key: String): Boolean {
+        if (key.isEmpty()) return false
+        if (!key[0].isLetter() && key[0] != '_') return false
+        return key.all { it.isLetterOrDigit() || it == '_' || it == '.' || it == '-' }
+    }
+
+    private fun isNumberLiteral(value: String): Boolean {
+        var digits = 0
+        var dots = 0
+        for (i in 0 until value.length) {
+            val c = value[i]
+            if (c == '-' && i == 0) continue
+            if (c == '.') {
+                dots++
+                if (dots > 1) return false
+            } else if (c.isDigit()) digits++
+            else return false
+        }
+        return digits > 0
     }
     
     private fun escapeJsonString(s: String): String {

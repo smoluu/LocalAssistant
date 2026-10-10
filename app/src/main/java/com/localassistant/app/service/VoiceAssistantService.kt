@@ -641,6 +641,9 @@ class VoiceAssistantService : Service() {
                         messages = messagesList,
                         model = model,
                         stream = false,
+                        maxTokens = currentSettings.llmMaxTokens,
+                        reasoningBudgetTokens = currentSettings.llmReasoningBudgetTokens,
+                        chatTemplateKwargs = currentSettings.llmChatTemplateKwargs,
                         systemPrompt = currentSettings.systemPrompt,
                         timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
                     )
