@@ -20,6 +20,7 @@ import com.localassistant.app.ui.common.playWakeCue
 import com.localassistant.app.ui.common.playTTSAudio
 import com.localassistant.app.ui.common.recordAudioWithVAD
 import com.localassistant.app.ui.common.wakeCostThreshold
+import com.localassistant.app.ui.common.voiceInteractionBound
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -178,6 +179,14 @@ class WakeChatService : VoiceInteractionService() {
         // system-driven path dead even on a platform that has bound this app as its
         // assistant.
         super.onReady()
+        // Reaching this line at all is the platform's own proof that it resolved
+        // this app as its voice interaction manager: the base above resolves it or
+        // throws, and a vendor picker that records the choice in Settings.Secure
+        // without granting the assistant role leaves the role query in
+        // DefaultAssistant.kt answering "not held" for a user who has set the
+        // picker. Recording the binding here is what lets the settings page tell
+        // the two cases apart.
+        voiceInteractionBound = true
         android.util.Log.i(
             "WakeChatService",
             "onReady: the system has bound this app as its voice interaction service"
