@@ -208,6 +208,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleVoiceCommandIntent(intent)
+        handleWakeTriggerIntent(intent)
     }
 
     private fun handleVoiceCommandIntent(intent: Intent?) {
@@ -218,6 +219,27 @@ class MainActivity : ComponentActivity() {
                 _lastVoiceCommand.value = commandText
             }
         }
+    }
+
+    /**
+     * Run one wake exchange straight away.
+     *
+     * This is the debug entry point: the shell cannot address the service itself,
+     * because it declares android.permission.BIND_VOICE_INTERACTION and the
+     * ServiceManager rejects a caller that does not hold that capability - which
+     * rules out `am start-foreground-service`. An intent built here is sent by the
+     * app, which does hold it, so the same action reaches the running service.
+     */
+    private fun handleWakeTriggerIntent(launchIntent: Intent?) {
+        if (launchIntent?.action !=
+            com.localassistant.app.service.WakeChatService.ACTION_TRIGGER_EXCHANGE
+        ) return
+
+        val wakeIntent = com.localassistant.app.service.WakeChatService.buildIntent(
+            this,
+            com.localassistant.app.service.WakeChatService.ACTION_TRIGGER_EXCHANGE
+        )
+        startForegroundService(wakeIntent)
     }
 
     /**
@@ -242,6 +264,7 @@ class MainActivity : ComponentActivity() {
         
         // Handle intent from launch (first start)
         handleVoiceCommandIntent(intent)
+        handleWakeTriggerIntent(intent)
         
         // Observe settings so theme changes (e.g. dark mode toggle) apply live
         val settingsRepository = SettingsRepository(applicationContext)
