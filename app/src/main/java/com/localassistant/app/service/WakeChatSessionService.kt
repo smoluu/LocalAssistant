@@ -80,7 +80,7 @@ private const val SURFACE = 0xE6141414.toInt()
 
 private const val MUTED = 0xFFAAAAAA.toInt()
 
-private const val USER_TEXT = 0xFFEDE6D6.toInt()
+private const val USER_TEXT = 0xFFE8E8E8.toInt()
 
 private const val REPLY_TEXT = 0xFFF2A94C.toInt()
 
@@ -239,8 +239,12 @@ private const val MAX_WINDOW_HEIGHT = MAX_CARD_HEIGHT + WINDOW_OVERHEAD + BOTTOM
 /**
  * The glyph that leads the status line, wearing the colour of the phase.
  *
- * It is a character rather than a view because a session has no horizontal
- * container to put a dot beside a label in.
+ * It is a character rather than a drawn shape because a session has no drawable
+ * to place: the only paint a widget can carry is a background, and a background
+ * fills the whole widget. Giving it its own `TextView` in the status row is what
+ * lets the dot wear the phase's colour while the label beside it stays muted -
+ * one `TextView` can hold two colours, and the phase would lose its colour the
+ * moment the label shared it.
  */
 private const val PHASE_DOT = "\u2B24"
 
@@ -268,6 +272,15 @@ private const val BUBBLE_RADIUS = 20f
  * builds its children once and the structure cannot grow between shows.
  */
 private const val BUBBLE_GAP = 20
+
+/**
+ * The gap between the status dot and the label beside it.
+ *
+ * A row lays its children flush against each other, so the breathing room the
+ * card's own padding would give is nothing here - the gap has to be padding on
+ * the dot itself, which is also what keeps the dot's ink clear of the label's.
+ */
+private const val STATUS_DOT_GAP = 14
 
 /**
  * The main-axis orientation every container in the card is forced to.
@@ -431,6 +444,7 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
     private val card = LinearLayout(context)
     private val panel = LinearLayout(context)
     private val statusLine = TextView(context)
+    private val statusDot = TextView(context)
     private val userBubble = LinearLayout(context)
     private val userLines = (0 until USER_MAX_LINES).map { _ -> TextView(context) }
     private val replyBubble = LinearLayout(context)
@@ -458,6 +472,7 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
      * ever swaps which shape a widget carries.
      */
     private val ruler = LinearLayout(context)
+    private val statusRow = LinearLayout(context)
     private val userRow = LinearLayout(context)
     private val replyRow = LinearLayout(context)
     private val cardShape = rounded(SURFACE, CARD_RADIUS)
@@ -570,9 +585,13 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
         panel.setPadding(CARD_SIDE_PADDING, CARD_TOP_PADDING, CARD_SIDE_PADDING, CARD_BOTTOM_PADDING)
         panel.addView(ruler)
         ruler.setPadding(CARD_WIDTH / 2, 0, CARD_WIDTH / 2, 0)
-        panel.addView(statusLine)
-        statusLine.setGravity(Gravity.LEFT)
-        statusLine.setPadding(0, 0, 0, BUBBLE_GAP)
+        panel.addView(statusRow)
+        statusRow.setGravity(Gravity.LEFT)
+        statusRow.setPadding(0, 0, 0, BUBBLE_GAP)
+        statusRow.addView(statusDot)
+        statusDot.textSize = STATUS_SIZE
+        statusDot.setPadding(0, 0, STATUS_DOT_GAP, 0)
+        statusRow.addView(statusLine)
         statusLine.textSize = STATUS_SIZE
         panel.addView(userRow)
         userRow.setGravity(Gravity.TOP or Gravity.LEFT)
@@ -611,13 +630,16 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
      * always says what it is doing even before a word has been heard.
      */
     private fun paint() {
+        statusDot.text = ""
         statusLine.text = ""
         userLines.forEach { line -> line.text = "" }
         replyLines.forEach { line -> line.text = "" }
         val closed = state == SESSION_STATE_CLOSE
         panel.background = if (closed) clearShape else cardShape
-        statusLine.text = if (closed) "" else PHASE_DOT + " " + statusLabel()
-        statusLine.setTextColor(if (closed) TRANSPARENT else phaseColor())
+        statusDot.text = if (closed) "" else PHASE_DOT
+        statusDot.setTextColor(if (closed) TRANSPARENT else phaseColor())
+        statusLine.text = if (closed) "" else statusLabel()
+        statusLine.setTextColor(if (closed) TRANSPARENT else MUTED)
         userBubble.background = if (request.isBlank()) clearShape else userShape
         replyBubble.background = if (reply.isBlank()) clearShape else replyShape
         val userPad = if (request.isBlank()) 0 else BUBBLE_PADDING
@@ -673,13 +695,13 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
     }
 
     /**
-     * The colour of the status line, which is the exchange's phase wearing the
+     * The colour of the status dot, which is the exchange's phase wearing the
      * colour it is doing in.
      *
-     * The dot is a glyph in the line rather than its own view because there is no
-     * horizontal container here: neither `android.widget.LinearLayoutHorizontal`
-     * nor `android.view.LinearLayoutHorizontal` resolves in this toolchain, so the
-     * dot and the label share the one TextView that can sit on a row.
+     * Only the dot wears it: the label beside it stays [MUTED], so the phase is
+     * legible from across a room by colour alone while the words stay quiet
+     * instead of shouting the state. A state the wake service does not name is
+     * taken as a fault and wears [ERROR].
      */
     private fun phaseColor(): Int = when (state) {
         SESSION_STATE_LISTENING -> DOT_LISTENING
@@ -734,7 +756,7 @@ private class WakeChatSession(private val context: android.app.Service) : VoiceI
     override fun onShow(args: android.os.Bundle?, showFlags: Int) {
         Log.i(
             "WakeChatSessionService",
-            "Shown state=$state stageW=${stage.width} stageH=${stage.height} cardW=${card.width} cardH=${card.height} panelW=${panel.width} panelH=${panel.height} statusW=${statusLine.width} statusH=${statusLine.height} u0W=${userLines[0].width} u0H=${userLines[0].height} u0T=${userLines[0].text.length} r0T=${replyLines[0].text.length} userBW=${userBubble.width} userBH=${userBubble.height} replyBW=${replyBubble.width} replyBH=${replyBubble.height} userRowW=${userRow.width} replyRowW=${replyRow.width}"
+            "Shown state=$state stageW=${stage.width} stageH=${stage.height} cardW=${card.width} cardH=${card.height} panelW=${panel.width} panelH=${panel.height} rowW=${statusRow.width} dotW=${statusDot.width} statusW=${statusLine.width} statusH=${statusLine.height} u0W=${userLines[0].width} u0H=${userLines[0].height} u0T=${userLines[0].text.length} r0T=${replyLines[0].text.length} userBW=${userBubble.width} userBH=${userBubble.height} replyBW=${replyBubble.width} replyBH=${replyBubble.height} userRowW=${userRow.width} replyRowW=${replyRow.width}"
         )
         if (state == SESSION_STATE_CLOSE) finish()
     }
