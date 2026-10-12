@@ -88,6 +88,9 @@ class WakeChatService : VoiceInteractionService() {
         // number of frames is [RISE_FRAMES], the same count the session counts its
         // climb in, so the two halves cannot drift apart.
         private const val RISE_FRAME_MS = 70L
+        // How often a reply that is still arriving is re-shown, so the answer
+        // bubble grows with the stream without a round trip per token.
+        private const val SESSION_REPAINT_MS = 300L
 
         /**
          * Build an intent for this service with the given action.
@@ -164,6 +167,13 @@ class WakeChatService : VoiceInteractionService() {
     // and clears it, so a trigger can never repeat itself.
     @Volatile
     private var manualTrigger = false
+
+    // How many session requests have failed in a row. A platform that refuses
+    // sessions answers on every request, and the reply is re-shown as it streams,
+    // so the refusal is reported once and then dropped rather than spamming the
+    // notification for the whole answer.
+    @Volatile
+    private var sessionFailures = 0
 
     // Coroutine scope for the listening loop. cancel() permanently finishes a
     // scope, so stopListening() replaces it with a fresh one before the next start.
@@ -366,6 +376,13 @@ class WakeChatService : VoiceInteractionService() {
         currentSettings: com.localassistant.app.domain.model.AppSettings
     ) {
         val closeMs = currentSettings.wakeChatCloseSeconds.coerceIn(1, 300) * 1000L
+        // The window measures silence, not work. It is started here rather than
+        // inherited from the last stamp inside the exchange, because the stages
+        // that end an exchange - recording the request, STT, the LLM, speaking
+        // the reply - are the system thinking, and a slow round trip to any of
+        // them would otherwise spend the reading time the user asked for before
+        // this hold is even entered.
+        touchChat()
         while (true) {
             delay(TOUCH_POLL_MS)
             // Stopping the service has already closed the chat, so the hold only
@@ -522,6 +539,10 @@ class WakeChatService : VoiceInteractionService() {
             // they listen.
             requestSession(SESSION_STATE_REPLY, request, reply)
             _phase.value = PHASE_SPEAKING
+            // The card says "Speaking…" while the reply is voiced, so the label
+            // matches the audio rather than the full reply appearing before it has
+            // been heard.
+            requestSession(SESSION_STATE_SPEAKING, request, reply)
             // Speaking the reply is activity right up to its last syllable, so
             // the close clock is stamped before it starts and the hold below
             // never cuts the audio.
@@ -538,6 +559,9 @@ class WakeChatService : VoiceInteractionService() {
                 enableStreaming = currentSettings.enableTtsStreaming,
                 timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
             )
+            // The reply has been spoken, so the card settles on the two bubbles
+            // with no status label - a settled exchange is just the conversation.
+            requestSession(SESSION_STATE_REPLY, request, reply)
         }
         // The chat stays open while anything on it is alive and closes itself once
         // it has been idle for the configured window.
@@ -578,6 +602,7 @@ class WakeChatService : VoiceInteractionService() {
      * user through the notification and TTS.
      */
     private fun requestSession(state: String, request: String, reply: String) {
+        if (sessionFailures >= 3) return
         try {
             val args = android.os.Bundle()
             args.putString(SESSION_STATE_KEY, state)
@@ -585,7 +610,9 @@ class WakeChatService : VoiceInteractionService() {
             args.putString(SESSION_REPLY_KEY, reply)
             android.util.Log.i("WakeChatService", "Asking the system to draw this exchange")
             showSession(args, 0)
+            sessionFailures = 0
         } catch (e: Exception) {
+            sessionFailures++
             // The reason is surfaced in the notification rather than only logged:
             // Kotlin's log never reaches logcat here, and the refusal is the one
             // thing the user can read to tell whether the platform hosts the
@@ -650,6 +677,9 @@ class WakeChatService : VoiceInteractionService() {
         val history = _messages.value.takeLast(MAX_LLM_CONTEXT).map { msg ->
             mapOf("role" to msg.role.name.lowercase(), "content" to msg.content)
         }
+        // The answer as it has arrived so far, and when it was last drawn.
+        var streamed = ""
+        var lastPaintMs = 0L
         return try {
             ApiClient.chatCompletion(
                 baseUrl = currentSettings.llmBaseUrl,
@@ -663,7 +693,21 @@ class WakeChatService : VoiceInteractionService() {
                 // Text arriving on the stream is activity on the chat, so the
                 // close clock follows the answer as it is written rather than
                 // waiting for it to finish.
-                onChunk = { touchChat() },
+                onChunk = { chunk ->
+                    touchChat()
+                    // Reasoning deltas carry the separator marker and are never
+                    // drawn; content deltas grow the answer bubble as they arrive,
+                    // throttled to [SESSION_REPAINT_MS] so the card is not
+                    // re-shown once per token.
+                    if (!chunk.startsWith("\u0001")) {
+                        streamed += chunk
+                        val now = System.currentTimeMillis()
+                        if (now - lastPaintMs >= SESSION_REPAINT_MS) {
+                            lastPaintMs = now
+                            requestSession(SESSION_STATE_STREAMING, request, visibleReply(streamed))
+                        }
+                    }
+                },
                 timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
             ).content
         } catch (e: Exception) {
@@ -672,6 +716,22 @@ class WakeChatService : VoiceInteractionService() {
             updateNotification("LLM failed: ${e.message}")
             ""
         }
+    }
+
+    /**
+     * The part of a reply that is safe to draw while it is still arriving.
+     *
+     * A reasoning model can open a thinking tag inside the content deltas before
+     * the answer itself starts; the final reply is cleaned by
+     * [ApiClient.parseReasoningAndContent], but a partial that is painted mid-stream
+     * would show the raw tag, so the tags are dropped here as well.
+     */
+    private fun visibleReply(text: String): String {
+        var visible = text
+        for (tag in listOf("<think>", "</think>", "<thinking>", "</thinking>", "<reasoning>", "</reasoning>")) {
+            visible = visible.replace(tag, "")
+        }
+        return visible
     }
 
     // ==================== Notification Management ====================
