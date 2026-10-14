@@ -1,15 +1,19 @@
 # Local Assistant - On-Device AI Voice Assistant
 
-A privacy-first, fully local AI voice assistant for Android that connects to your own running services. No cloud dependencies, no telemetry, no data leaves your device.
+A privacy-first, fully local AI voice assistant for Android that connects to your own running
+services. No cloud dependencies, no telemetry, no data leaves your device.
 
 ## Features
 
 ### Core Capabilities
-- **On-Device Wake Word Detection** - Matches your own recorded phrases against the microphone clip on-device (no built-in phrase, no cloud, no external runtime); detection never fires on silence or room noise
+- **On-Device Wake Word Detection** - Matches your own recorded phrases against the microphone clip
+  on-device (no built-in phrase, no cloud, no external runtime); detection never fires on silence or room noise
 - **Voice Pipeline** - Complete voice interaction: STT → LLM → TTS
-- **Barge-in Support** - Interrupt the assistant while it's speaking
-- **Continuous Conversation Mode** - Automatic listening after each response
-- **Hands-Free Overlay Outside The App** - The exchange is drawn over the home screen or whatever the device is showing, through a voice interaction session service
+- **Continuous Conversation** - One wake word opens a conversation: after every reply the mic re-arms,
+  so you keep talking to the assistant until there is real silence
+- **Hands-Free Overlay Outside The App** - The exchange is drawn over the home screen or whatever the
+  device is showing, through a voice interaction session service - it stays visible while the app is minimized
+- **Chat History** - Timestamped conversation on the chat screen, with pinning and summarization
 
 ### Privacy & Security
 - 100% local processing - all AI runs on your own hardware
@@ -18,88 +22,103 @@ A privacy-first, fully local AI voice assistant for Android that connects to you
 - OpenAI-compatible endpoints for maximum flexibility
 
 ### User Interface
-- Clean Material 3 design with dynamic colors
-- Floating overlay when listening or speaking
-- Chat history screen with timestamps
-- Comprehensive settings for all configurations
+- Clean Material 3 design with the Gruvbox palette
+- A compact card that rises from the bottom edge, with the reply streaming into its bubble
+- A status dot and label that name the current phase (Ready / Listening… / Thinking… / Answering… / Speaking…)
+- Comprehensive settings for every configuration
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                   UI Layer (Compose)                 │
+│                   UI Layer (Compose)                │
 │  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │
-│  │ ChatScreen│  │Settings │  │ VoiceControlsBar │  │
+│  │ ChatScreen│ │Settings │  │ VoiceControlsBar │  │
 │  └──────────┘  └──────────┘  └──────────────────┘  │
 ├─────────────────────────────────────────────────────┤
-│                ViewModel Layer                       │
+│                ViewModel Layer                      │
 │  ┌──────────────┐  ┌──────────────────┐            │
 │  │ ChatViewModel│  │SettingsViewModel │            │
 │  └──────────────┘  └──────────────────┘            │
 ├─────────────────────────────────────────────────────┤
-│                 Service Layer                        │
-│  ┌──────────────────────────────────────────────┐   │
-│  │         VoiceAssistantService                │   │
-│  │  ┌─────────┐ ┌──────┐ ┌─────┐ ┌──────────┐ │   │
-│  │  │ Wake    │ │ STT  │ │ LLM │ │ TTS      │ │   │
-│  │  │ Word    │ │ API  │ │ API │ │ Audio    │ │   │
-│  │  │ Detect  │ │Client│ │Client│ │ Player  │ │   │
-│  │  └─────────┘ └──────┘ └─────┘ └──────────┘ │   │
-│  └──────────────────────────────────────────────┘   │
+│                 Service Layer                       │
+│  ┌──────────────────────────────────────────────┐  │
+│  │ VoiceAssistantService (in-app pipeline)      │  │
+│  │  audio capture → VAD → STT → LLM → TTS       │  │
+│  ├──────────────────────────────────────────────┤  │
+│  │ WakeChatService (hands-free, a               │  │
+│  │   VoiceInteractionService)                   │  │
+│  │  wake match → record → STT → LLM → TTS       │  │
+│  │        ↓ showSession()          ↑ re-arm mic │  │
+│  │ WakeChatSessionService (draws the card)      │  │
+│  └──────────────────────────────────────────────┘  │
 ├─────────────────────────────────────────────────────┤
-│                  Data Layer                          │
+│                  Data Layer                         │
 │  ┌──────────────┐  ┌──────────────────┐            │
 │  │ Room DB      │  │ SharedPreferences│            │
 │  │ (Chat History)│ │ (Settings)       │            │
 │  └──────────────┘  └──────────────────┘            │
 ├─────────────────────────────────────────────────────┤
-│              External Services (Local)               │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐         │
-│  │ LLM      │  │ STT      │  │ TTS      │         │
-│  │ (Ollama/ │  │ (Whisper)│  │ (Piper/) │         │
-│  │ vLLM/etc)│  │          │  │          │         │
-│  └──────────┘  └──────────┘  └──────────┘         │
+│           External Services (Local)                 │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐          │
+│  │ LLM      │  │ STT      │  │ TTS      │          │
+│  │ (OpenAI- │  │ (OpenAI  │  │ (OpenAI  │          │
+│  │  compat) │  │  audio)  │  │  audio)  │          │
+│  └──────────┘  └──────────┘  └──────────┘          │
 └─────────────────────────────────────────────────────┘
 ```
 
 ## Prerequisites
 
 ### Android Device
-- Android 15.0 (API 35) or higher
+- Android 12 (API 35) or higher - `minSdk` and `targetSdk` are both 35
 - Microphone access
-- Network access to local AI services
+- Network access to your local AI services
+- **To use the hands-free overlay**, the platform must host hands-free conversations: open the
+  system's "Default digital assistant" page and select LocalAssistant. Without that selection the
+  app still runs its own pipeline, but the system refuses to draw the card outside the app.
 
 ### Local AI Services
 
-You need to run these services on your local network:
+You need to run these services on your local network. Any OpenAI-compatible server works; the app
+is tested against the ones named below.
 
-#### 1. LLM Service (OpenAI-compatible API)
-Recommended: [Ollama](https://ollama.ai/) or [vLLM](https://github.com/vllm-project/vllm)
-
-```bash
-# Example with Ollama
-ollama serve
-# Then pull a model:
-ollama pull llama3.1:8b
-```
-
-#### 2. STT Service (Speech-to-Text)
-Recommended: [Whisper](https://github.com/openai/whisper) or [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
+#### 1. LLM Service (OpenAI-compatible `/v1/chat/completions`)
+Tested against [llama.cpp](https://github.com/ggml-org/llama.cpp) `server`;
+[Ollama](https://ollama.ai/) and [vLLM](https://github.com/vllm-project/vllm) also work.
 
 ```bash
-# Example with faster-whisper server
-pip install faster-whisper-server
-faster-whisper-server --model large-v3 --host 0.0.0.0 --port 8080
+# llama.cpp
+llama-server -m /models/Qwen3.5-4B-Q4_K_M.gguf --port 8086
+# or Ollama
+ollama pull llama3.1:8b && ollama serve
 ```
 
-#### 3. TTS Service (Text-to-Speech)
-Recommended: [Piper](https://github.com/rhasspy/piper) or Coqui TTS
+> Reasoning models stream their chain of thought before the answer, so keep `max_tokens` generous
+> (256 or more) or the response comes back with empty `content`.
+
+#### 2. STT Service (OpenAI-compatible `/v1/audio/transcriptions`)
+Tested against [whisper.cpp](https://github.com/ggml-org/whisper.cpp) `server`;
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper) works too.
 
 ```bash
-# Example with Piper
-pip install piper-tts
-piper --model en_US-ryan-high --output-type wav
+# whisper.cpp
+./whisper-server -m ggml-medium.bin -t 8 --port 8088
 ```
+
+#### 3. TTS Service (OpenAI-compatible `/v1/audio/speech`)
+Tested against a `qwentts.cpp` server; [Piper](https://github.com/rhasspy/piper) and Coqui TTS work
+behind an OpenAI-compatible shim.
+
+```bash
+# Always send response_format - it names the container the client receives
+curl -X POST http://192.168.1.100:8087/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"<model>","input":"Hello","response_format":"wav"}'
+```
+
+> Never hardcode a voice name: read `GET /v1/audio/voices` and use what it advertises. A server
+> that answers `{"voices":[]}` rejects every `voice` field, so omit it there.
 
 ## Setup Instructions
 
@@ -111,42 +130,58 @@ cd /path/to/LocalAssistant
 
 ### 2. Install on Device
 ```bash
-adb install app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 ### 3. Configure Endpoints
 Open the app → Settings:
-- **LLM Base URL**: Your LLM service endpoint (e.g., `http://192.168.1.100:11434/api`)
-- **STT Base URL**: Your STT service endpoint (e.g., `http://192.168.1.100:8080`)
-- **TTS Base URL**: Your TTS service endpoint (e.g., `http://192.168.1.100:5001`)
+- **LLM Base URL**: e.g. `http://192.168.1.100:8086`
+- **STT Base URL**: e.g. `http://192.168.1.100:8088`
+- **TTS Base URL**: e.g. `http://192.168.1.100:8087`
+
+Base URLs may be given with or without the trailing route - the client strips a known suffix and
+appends the correct one.
 
 ### 4. Grant Permissions
 The app will request:
 - Microphone access (for voice input)
-- Notification access (for always-listening mode)
+- The persistent notification required for always-listening mode
 - Battery optimization exemption (recommended for continuous operation)
 
 ## Usage
 
-### Starting the Assistant
-1. Open the app → Settings → Wake Word and record one or more references of the phrase you want to say ("Record Reference"). Detection only matches those recordings.
-2. Tap the microphone button in the bottom bar to start listening
-3. Say the phrase you enrolled
-4. Speak your command after the confirmation chime
-5. The assistant will respond via TTS
-
-### Voice Controls
-- **Tap mic button**: Start/stop listening
-- **Floating overlay**: Shows current state (listening, processing, speaking)
-- **Barge-in**: Tap the floating overlay to interrupt while speaking
+### Waking the Assistant
+1. Open the app → Settings → Wake Word and record one or more references of the phrase you want to
+   say ("Record Reference"). Detection only matches those recordings; with none enrolled the wake
+   service reports that and never fires.
+2. Start listening (mic button, or the home-screen widget). The service keeps running while the app
+   is minimized.
+3. Say the phrase you enrolled. The card rises from the bottom edge and the chime confirms it heard
+   you - the card is raised first, so it is already up when the chime sounds.
+4. Speak your request. The transcript appears in the user bubble, the reply streams into the answer
+   bubble as it arrives, and TTS reads it aloud.
+5. **Keep talking.** After the reply the mic re-arms and the card still shows the previous turn, so
+   you can ask a follow-up without saying the wake word again. The card closes once real silence
+   reaches the configured timeout - listening, thinking and speaking never count down against it.
 
 ### Settings
 Configure all aspects of the assistant:
-- API endpoints and model names
+- API endpoints, model names and voices
 - Wake word references (recorded on-device) and match sensitivity
-- Voice activity detection settings
+- Voice activity detection (minimum silence, energy floor)
 - System prompt for custom behavior
-- Service controls (foreground service, continuous mode)
+- Wake chat windows: the first-turn request window and the close timeout
+- Generation controls: `max_tokens`, reasoning budget and `chat_template_kwargs`
+
+### Debugging From adb
+Trigger an exchange without going through the menus or saying the phrase:
+```bash
+adb shell "am start -W -a com.localassistant.TRIGGER_WAKE_CHAT com.localassistant.app/.ui.MainActivity"
+```
+The service logs its own phase, so `adb logcat` filtered on the class name is the running trace:
+```bash
+adb logcat | grep WakeChat
+```
 
 ## Project Structure
 
@@ -167,23 +202,24 @@ app/
 │   │   └── settings/                   # Settings repository
 │   │       └── SettingsRepository.kt
 │   ├── service/                        # Foreground services
-│   │   ├── VoiceAssistantService.kt    # Main voice pipeline service
-│   │   ├── WakeChatService.kt          # Hands-free wake-word service (a VoiceInteractionService)
-│   │   └── WakeChatSessionService.kt   # Draws the exchange over the system UI (a VoiceInteractionSessionService)
+│   │   ├── VoiceAssistantService.kt    # Main in-app voice pipeline
+│   │   ├── WakeChatService.kt          # Hands-free wake-word pipeline (a VoiceInteractionService)
+│   │   ├── WakeChatSessionService.kt   # Draws the exchange over the system UI (a VoiceInteractionSessionService)
+│   │   └── WakeChatRecognitionService.kt # Hollow RecognitionService stub required by the manifest resource
 │   ├── ui/                             # Compose UI
-│   │   ├── MainActivity.kt             # Entry point, navigation & wake overlay
+│   │   ├── MainActivity.kt             # Entry point & navigation graph
 │   │   ├── chat/                       # Chat screen components
-│   │   │   ├── ChatScreen.kt           # Main chat interface
+│   │   │   ├── ChatScreen.kt           # Main chat interface & VoiceControlsBar
 │   │   │   └── ChatViewModel.kt        # Chat state management
-│   │   ├── wake/                       # Hands-free wake overlay (renderer only)
-│   │   │   ├── WakeChatScreen.kt
-│   │   │   └── WakeChatViewModel.kt
+│   │   ├── wake/                       # Wake service plumbing (renderer only)
+│   │   │   └── WakeChatViewModel.kt    # Forwards the service's state & start/stop intents
 │   │   ├── settings/                   # Settings screen components
 │   │   │   ├── SettingsScreen.kt       # Configuration UI
 │   │   │   └── SettingsViewModel.kt    # Settings state management
 │   │   ├── common/                     # Audio helpers, VAD, wake-word matcher
 │   │   │   ├── CommonUtilities.kt
-│   │   │   └── WakeWordDetector.kt
+│   │   │   ├── WakeWordDetector.kt
+│   │   │   └── DefaultAssistant.kt     # Assistant-role oracle & picker intents
 │   │   └── theme/                      # Gruvbox Material3 colour schemes
 │   │       └── Theme.kt
 │   ├── receiver/                       # Broadcast receivers
@@ -202,7 +238,11 @@ app/
 │   └── xml/
 │       ├── network_security_config.xml # Cleartext HTTP to local endpoints
 │       ├── voice_interaction.xml       # Names the voice service and its session half
-│       └── widget_voice_assistant.xml  # Widget descriptor
+│       ├── widget_voice_assistant.xml  # Widget descriptor
+│       ├── backup_rules.xml
+│       └── data_extraction_rules.xml
+├── src/main/assets/
+│   └── voice_clone.wav                 # Bundled sample used by the TTS/STT tests
 ├── build.gradle.kts                    # Module-level Gradle config
 └── AndroidManifest.xml                 # App manifest with permissions
 ```
@@ -214,23 +254,36 @@ app/
 - Verify network connectivity between device and services
 - Ensure battery optimization is disabled for the app
 
+### The Card Only Renders Inside the App
+The session window is drawn by the platform, so the app has to hold the assistant role. Open the
+system's "Default digital assistant" page and select LocalAssistant, then start the service again -
+`adb install` force-stops the running process. The service logs
+`onReady: the system has bound this app as its voice interaction service` once the platform has
+really bound it; if that line never appears, the selection is the problem, not the code.
+
 ### Audio Issues
 - Grant microphone permission in Settings → Permissions
-- Check that audio format matches your STT service requirements (16kHz, mono, 16-bit PCM)
+- Check that audio format matches your STT service requirements (16 kHz, mono, 16-bit PCM)
+- TTS sample rates are tried in a fallback loop - device support varies widely
 
 ### Network Errors
-- Verify base URLs are correct and accessible from device
+- Verify base URLs are correct and accessible from the device
 - Check network security config allows cleartext HTTP to local IPs
 - Ensure firewall rules allow incoming connections on service ports
 
+### Wake Word Never Fires
+- Enroll at least one reference first - the matcher has no built-in phrase
+- Use the Settings "Test Wake Word" action, which prints the measured DTW cost against the current
+  threshold, then tune the sensitivity slider
+
 ## Future Enhancements
 
-- [ ] Implement VAD (Voice Activity Detection) with silero-vad
-- [ ] Add barge-in support via AudioTrack interruption handling
-- [ ] Implement Media3 ExoPlayer for TTS audio playback
-- [ ] Add Hilt DI for better testability
+- [ ] Replace the built-in energy VAD with a model-based detector (silero-vad)
+- [ ] Add barge-in support: interrupt the assistant while it is speaking
+- [ ] Play TTS audio through Media3 ExoPlayer instead of `AudioTrack`
+- [ ] Add Hilt dependency injection for better testability
 - [ ] Implement encrypted storage for API keys
-- [ ] Support multiple wake phrases with different actions
+- [ ] Support multiple wake phrases bound to different actions
 
 ## License
 
@@ -238,7 +291,9 @@ MIT License - See LICENSE file for details
 
 ## Acknowledgments
 
-- [Ollama](https://ollama.ai/) for local LLM serving
-- [Whisper](https://github.com/openai/whisper) for speech recognition
-- [Piper](https://github.com/rhasspy/piper) for text-to-speech
+- [llama.cpp](https://github.com/ggml-org/llama.cpp), [Ollama](https://ollama.ai/) and
+  [vLLM](https://github.com/vllm-project/vllm) for local LLM serving
+- [whisper.cpp](https://github.com/ggml-org/whisper.cpp) and
+  [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for speech recognition
+- [Piper](https://github.com/rhasspy/piper) and Coqui TTS for text-to-speech
 - [Jetpack Compose](https://developer.android.com/jetpack/compose) for modern UI

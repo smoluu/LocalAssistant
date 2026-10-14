@@ -78,12 +78,31 @@ class WakeChatService : VoiceInteractionService() {
         const val PHASE_ERROR = "error"
 
         // How many of the newest wake-chat turns are sent to the LLM as context.
-        private const val MAX_LLM_CONTEXT = 20
+        // Deliberately small: a follow-up turn re-sends the whole history, so the
+        // prompt is paid again on every turn of a conversation, and the local
+        // model is small enough that a long prompt is mostly latency.
+        private const val MAX_LLM_CONTEXT = 8
         // How long the "nothing is enrolled yet" hint stays on the overlay.
         private const val REFERENCE_HINT_MS = 3000L
+        // How long the "could not hear the request" hint stays readable before
+        // the card closes. Long enough to read, short enough that a silent room
+        // does not look like the assistant is still waiting for a request.
+        private const val CLOSED_HINT_MS = 1200L
+        // How long the microphone stays down between a spoken reply and the next
+        // turn. The speakers sit beside the microphone, so the tail of the reply
+        // that was just voiced would otherwise be recorded as the next question.
+        private const val MIC_REARM_MS = 350L
         // How often the idle-close watchdog re-reads the activity stamp. The
         // length of the wait itself is the user's setting, never a constant.
         private const val TOUCH_POLL_MS = 200L
+        // How long the microphone may hear nothing before the wake-detection
+        // pass gives up on a clip. The recorder's own default is unbounded, which
+        // makes it hold a minute of quiet room and run the wake matcher over all
+        // of it - work that buys nothing, because silence cannot match. Speech
+        // still ends a clip on its own, so this only caps silence: it is also how
+        // long a manually triggered exchange may wait for the clip already in
+        // flight, which is why the debug trigger opens within a beat.
+        private const val WAKE_IDLE_SECONDS = 4
         // How long one frame of the card's climb from the bottom edge lasts. The
         // number of frames is [RISE_FRAMES], the same count the session counts its
         // climb in, so the two halves cannot drift apart.
@@ -159,6 +178,11 @@ class WakeChatService : VoiceInteractionService() {
     }
 
     private val stopSignal = AtomicBoolean(false)
+
+    // Aborts the clip the idle wake pass is holding without closing the chat, so a
+    // manually triggered exchange does not have to wait for that recording to reach
+    // its silence cap before the card can be raised.
+    private val wakeAbortSignal = AtomicBoolean(false)
 
     @Volatile
     private var listening = false
@@ -316,6 +340,7 @@ class WakeChatService : VoiceInteractionService() {
         if (listening) return
         listening = true
         stopSignal.set(false)
+        wakeAbortSignal.set(false)
         _phase.value = PHASE_DETECTING
 
         val scope = serviceScope
@@ -325,6 +350,7 @@ class WakeChatService : VoiceInteractionService() {
     private fun stopListening() {
         listening = false
         stopSignal.set(true)
+        wakeAbortSignal.set(true)
         // Stopping the service closes the chat, so its history goes with it -
         // a wake chat never carries a conversation into the next exchange.
         endExchange()
@@ -343,6 +369,11 @@ class WakeChatService : VoiceInteractionService() {
     fun triggerExchange() {
         if (!listening) startListening()
         manualTrigger = true
+        // The idle wake pass may be holding a clip of quiet room when the trigger
+        // arrives. Letting go of that clip is the difference between the card
+        // opening on a beat and opening up to the idle cap later, so the abort is
+        // requested here rather than left to the loop that reads the flag.
+        wakeAbortSignal.set(true)
     }
 
     /**
@@ -364,18 +395,17 @@ class WakeChatService : VoiceInteractionService() {
     }
 
     /**
-     * Hold the open chat until it has been idle for as long as the user allows,
-     * then close it and its history.
+     * Let the open chat stay on screen while it is quiet for [idleMs], and return
+     * as soon as it has been.
      *
      * Every stage of an exchange stamps the activity clock - each streamed token,
      * the spoken reply, and the user tapping the card from the overlay - so a
      * reply that is still working, or a user still reading one, never has the
-     * card taken away. Only genuine silence ends an exchange.
+     * card taken away. Only genuine silence lets this hold go, and the caller
+     * decides what to do then: a conversation is kept open by the live
+     * microphone, so the hold only ever carries a short readable beat.
      */
-    private suspend fun holdChatOpen(
-        currentSettings: com.localassistant.app.domain.model.AppSettings
-    ) {
-        val closeMs = currentSettings.wakeChatCloseSeconds.coerceIn(1, 300) * 1000L
+    private suspend fun holdWhileQuiet(idleMs: Long) {
         // The window measures silence, not work. It is started here rather than
         // inherited from the last stamp inside the exchange, because the stages
         // that end an exchange - recording the request, STT, the LLM, speaking
@@ -388,9 +418,8 @@ class WakeChatService : VoiceInteractionService() {
             // Stopping the service has already closed the chat, so the hold only
             // has to let go of it.
             if (!listening) break
-            if (System.currentTimeMillis() - _lastActivity.value >= closeMs) break
+            if (System.currentTimeMillis() - _lastActivity.value >= idleMs) break
         }
-        endExchange()
     }
 
     /**
@@ -404,7 +433,14 @@ class WakeChatService : VoiceInteractionService() {
         currentSettings: com.localassistant.app.domain.model.AppSettings
     ): Boolean {
         val clip = withContext(Dispatchers.IO) {
-            recordAudioWithVAD(appContext, stopSignal)
+            recordAudioWithVAD(
+                context = appContext,
+                // The idle pass watches its own abort signal rather than the service
+                // stop signal, so letting go of a clip of quiet room does not look
+                // like stopping the service.
+                stopSignal = wakeAbortSignal,
+                noSpeechTimeoutMs = WAKE_IDLE_SECONDS * 1000L
+            )
         }
         if (!listening) return false
 
@@ -439,18 +475,21 @@ class WakeChatService : VoiceInteractionService() {
 
     private suspend fun wakeLoop() {
         while (listening) {
-            val currentSettings = settingsRepository.settingsFlow.value
+            var currentSettings = settingsRepository.settingsFlow.value
             // A manual trigger from Settings runs the exchange without the wake
             // match, so the pipeline can be exercised on demand.
             val forced = manualTrigger
             manualTrigger = false
-            if (!forced && !waitForWake(currentSettings)) continue
+            if (!forced) {
+                // A fresh idle window: the abort flag is only a request to stop
+                // waiting for the phrase, so it must not stay set for the next one.
+                wakeAbortSignal.set(false)
+                if (!waitForWake(currentSettings)) continue
+            }
 
             // The wake clip is never transcribed: the phrase has already been
             // recognised on-device, so sending it to STT would put the wake word in
-            // front of the request. The chime is the user's cue that the microphone
-            // is recording now, and it has to finish before the recording starts.
-            playWakeCue()
+            // front of the request.
             raiseCard("")
             _phase.value = PHASE_LISTENING
             updateNotification(getPhaseText(PHASE_LISTENING))
@@ -459,48 +498,100 @@ class WakeChatService : VoiceInteractionService() {
             // ready tells the user nothing about the exchange they are in - they
             // would be speaking into a screen that shows nothing.
             //
+            // It is raised before the chime on purpose: the chime blocks until it
+            // has finished, so a card raised after it would appear a beat *behind*
+            // the sound the user already heard. Only the first frame is on the
+            // critical path, because the card is on screen from the first show.
+            //
             // The climb up from the bottom edge is a run of shows rather than an
-            // animation, because a session has no animation API - see [RISE_FRAMES].
-            // The last show settles the card and is the one that carries the
-            // "I'm listening" text.
+            // animation, because a session has no animation API - see [RISE_FRAMES]
+            // in the session. The last show settles the card and is the one that
+            // carries the "I'm listening" text.
             raiseSessionWindow()
             requestSession(SESSION_STATE_LISTENING, "", "")
+            // The chime still has to finish before the microphone starts, because
+            // it is the user's cue that they can speak now - it no longer delays
+            // the card.
+            playWakeCue()
 
-            // The reply window is the user's setting: enough time to say the
-            // request, and nothing heard within it ends the exchange instead of
-            // holding the microphone open for a minute. The silence that *ends*
-            // an utterance stays the configured VAD behaviour, so a request that
-            // begins late is still recorded in full.
-            val requestClip = withContext(Dispatchers.IO) {
-                recordAudioWithVAD(
-                    context = appContext,
-                    stopSignal = stopSignal,
-                    silenceThresholdMs = currentSettings.vadMinSilenceDurationMs
-                        .coerceIn(200, 5000).toLong(),
-                    noSpeechTimeoutMs = currentSettings.wakeReplySeconds
-                        .coerceIn(1, 300) * 1000L
-                )
-            }
-            if (!listening) break
-            val request = if (requestClip == null || requestClip.isEmpty()) {
-                ""
-            } else {
-                // A request clip that only holds whisper.cpp's bracketed markers is
-                // not speech, so it must not reach the LLM either.
-                val requestText = transcribe(currentSettings, requestClip) ?: ""
-                if (isNonSpeechTranscript(requestText)) "" else requestText
-            }
+            // One wake phrase opens a conversation rather than a single question.
+            // After every reply the microphone is re-armed straight away, so a
+            // follow-up is just the next sentence: making the user say the phrase
+            // again to ask anything else is the friction this mode exists to
+            // remove. Silence, not the wake word, is what ends a conversation.
+            var silenceWindowMs = currentSettings.wakeReplySeconds.coerceIn(1, 300) * 1000L
+            // The exchange the card is showing. The session draws one user and one
+            // reply bubble from the bundle it is handed, so a show that carries
+            // nothing would wipe the conversation the user is still looking at -
+            // every open show re-sends what is already on the card instead.
+            var lastRequest = ""
+            var lastReply = ""
+            var firstTurn = true
+            while (listening) {
+                // Settings are re-read per turn, so a user changing the reply or
+                // close window mid-conversation is honoured by the next turn.
+                currentSettings = settingsRepository.settingsFlow.value
+                if (!firstTurn) {
+                    // The reply has been heard and the microphone is live again, so
+                    // the card has to say so: without this the user has no cue that
+                    // the next sentence is already being recorded, and the mode
+                    // looks like it wants the wake phrase again. The last exchange
+                    // travels with the show, so the card keeps the conversation the
+                    // user is still reading rather than blanking under a new
+                    // question.
+                    _phase.value = PHASE_LISTENING
+                    updateNotification(getPhaseText(PHASE_LISTENING))
+                    requestSession(SESSION_STATE_LISTENING, lastRequest, lastReply)
+                }
+                firstTurn = false
+                // The window is the user's setting: enough time to say the request,
+                // and nothing heard within it ends the conversation instead of
+                // holding the microphone open for a minute. The silence that *ends*
+                // an utterance stays the configured VAD behaviour, so a request
+                // that begins late is still recorded in full.
+                val requestClip = withContext(Dispatchers.IO) {
+                    recordAudioWithVAD(
+                        context = appContext,
+                        stopSignal = stopSignal,
+                        silenceThresholdMs = currentSettings.vadMinSilenceDurationMs
+                            .coerceIn(200, 5000).toLong(),
+                        noSpeechTimeoutMs = silenceWindowMs
+                    )
+                }
+                if (!listening) break
+                val request = if (requestClip == null || requestClip.isEmpty()) {
+                    ""
+                } else {
+                    // A request clip that only holds whisper.cpp's bracketed markers is
+                    // not speech, so it must not reach the LLM either.
+                    val requestText = transcribe(currentSettings, requestClip) ?: ""
+                    if (isNonSpeechTranscript(requestText)) "" else requestText
+                }
 
-            if (request.isBlank()) {
-                _statusMessage.value = "Could not hear the request"
-                updateNotification("Could not hear the request")
-                // The card stays up for the configured window so the user can read
-                // why nothing was heard, then closes with its history.
-                holdChatOpen(currentSettings)
-                continue
-            }
+                if (request.isBlank()) {
+                    // Nothing was heard within the window, which is the end of the
+                    // conversation rather than a failed turn. The reason is shown
+                    // for a readable beat and then the card closes: holding it up
+                    // for the whole close window here would make a silent room look
+                    // like an assistant that is still waiting for a request.
+                    _statusMessage.value = "Could not hear the request"
+                    updateNotification("Could not hear the request")
+                    holdWhileQuiet(CLOSED_HINT_MS)
+                    break
+                }
 
-            answer(request, currentSettings)
+                lastRequest = request
+                lastReply = answer(request, currentSettings)
+                // The reply has just been voiced through speakers beside the
+                // microphone, so the mic is given a beat before it is live again -
+                // otherwise the tail of that reply becomes the next question.
+                delay(MIC_REARM_MS)
+                // The reply has been heard, so the next window is the user's close
+                // timeout: say nothing for that long and the conversation ends, say
+                // anything at all and it continues.
+                silenceWindowMs = currentSettings.wakeChatCloseSeconds.coerceIn(1, 300) * 1000L
+            }
+            endExchange()
         }
         _phase.value = PHASE_IDLE
     }
@@ -514,7 +605,7 @@ class WakeChatService : VoiceInteractionService() {
     private suspend fun answer(
         request: String,
         currentSettings: com.localassistant.app.domain.model.AppSettings
-    ) {
+    ): String {
         _messages.update { current ->
             current + listOf(ChatMessage.user(request))
         }
@@ -544,8 +635,8 @@ class WakeChatService : VoiceInteractionService() {
             // been heard.
             requestSession(SESSION_STATE_SPEAKING, request, reply)
             // Speaking the reply is activity right up to its last syllable, so
-            // the close clock is stamped before it starts and the hold below
-            // never cuts the audio.
+            // the close clock is stamped before it starts - the next turn's
+            // microphone window is measured from here, never from mid-audio.
             touchChat()
             playTTSAudio(
                 text = reply,
@@ -563,9 +654,7 @@ class WakeChatService : VoiceInteractionService() {
             // with no status label - a settled exchange is just the conversation.
             requestSession(SESSION_STATE_REPLY, request, reply)
         }
-        // The chat stays open while anything on it is alive and closes itself once
-        // it has been idle for the configured window.
-        holdChatOpen(currentSettings)
+        return reply
     }
 
     /**
