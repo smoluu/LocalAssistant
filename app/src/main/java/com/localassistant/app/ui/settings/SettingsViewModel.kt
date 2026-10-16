@@ -16,7 +16,9 @@ import com.localassistant.app.ui.common.playAudioBytes
 import com.localassistant.app.ui.common.recordAudioWithVAD
 import com.localassistant.app.ui.common.referenceFrameCount
 import com.localassistant.app.ui.common.saveWakeReference
+import com.localassistant.app.ui.common.wakeAgreement
 import com.localassistant.app.ui.common.wakeCostThreshold
+import com.localassistant.app.ui.common.wakeWordHeard
 import com.localassistant.app.ui.common.assistantSettingsIntents
 import com.localassistant.app.ui.common.isDefaultAssistantHeld
 import com.localassistant.app.service.WakeChatService
@@ -65,6 +67,14 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     // Health checks run when the settings screen opens, so they must fail fast: a
     // dead base URL shows as an error in seconds instead of hanging for a minute.
     private val probeTimeoutSeconds = 5L
+
+    // The enrollment recorder's windows. The wake phrase is a little over a second,
+    // so a take that has not started speaking within five seconds is a dead mic, not
+    // a slow user - give up then and say so instead of holding the screen at
+    // "Recording…" for the recorder's full default 60-second cap.
+    private val enrollmentClipSeconds = 10
+    private val enrollmentSilenceMs = 1000L
+    private val enrollmentNoSpeechMs = 5000L
 
     private val _settings = MutableStateFlow(repository.loadSettings())
     val settings: StateFlow<com.localassistant.app.domain.model.AppSettings> = _settings.asStateFlow()
@@ -583,9 +593,60 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     /**
      * Records one bounded utterance from the microphone, used by the wake-word
      * enrollment and test actions.
+     *
+     * The always-on wake loop holds an [AudioRecord] essentially all of the time,
+     * and the platform runs only one at a time: opening a second instance starves
+     * the first, which is what made the enrollment and the test capture a half-dead
+     * mic - the wake loop's own chunks fell to RMS 50 while this one heard the room.
+     * So the loop is paused for the duration of the clip and handed the mic back
+     * afterwards, leaving exactly one capture live.
+     *
+     * The recorder windows are passed explicitly rather than left to their defaults:
+     * the default no-speech timeout of zero disables the give-up entirely and the
+     * default cap is 60 seconds, so a starved or silent enrollment mic used to hold
+     * this screen at "Recording…" for a full minute before answering anything.
      */
-    private suspend fun recordWakeClip(): ByteArray? = withContext(Dispatchers.IO) {
-        recordAudioWithVAD(appContext, java.util.concurrent.atomic.AtomicBoolean(false))
+    private suspend fun recordWakeClip(): ByteArray? {
+        val paused = pauseWakeLoopMic()
+        return try {
+            withContext(Dispatchers.IO) {
+                recordAudioWithVAD(
+                    appContext,
+                    java.util.concurrent.atomic.AtomicBoolean(false),
+                    maxSeconds = enrollmentClipSeconds,
+                    silenceThresholdMs = enrollmentSilenceMs,
+                    noSpeechTimeoutMs = enrollmentNoSpeechMs
+                )
+            }
+        } finally {
+            if (paused) resumeWakeLoopMic()
+        }
+    }
+
+    /**
+     * Asks the wake service to let go of its clip so this screen can own the mic.
+     * Answers whether the loop is left paused, so the caller knows whether it has
+     * to hand the mic back.
+     */
+    private fun pauseWakeLoopMic(): Boolean =
+        try {
+            appContext.startForegroundService(
+                WakeChatService.buildIntent(appContext, WakeChatService.ACTION_STOP)
+            )
+            true
+        } catch (e: Exception) {
+            android.util.Log.w("WakeEnroll", "Wake loop could not be paused for the mic: ${describeFailure(e)}")
+            false
+        }
+
+    private fun resumeWakeLoopMic() {
+        try {
+            appContext.startForegroundService(
+                WakeChatService.buildIntent(appContext, WakeChatService.ACTION_START)
+            )
+        } catch (e: Exception) {
+            android.util.Log.w("WakeEnroll", "Wake loop could not be resumed: ${describeFailure(e)}")
+        }
     }
 
     /**
@@ -600,18 +661,32 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             val clip = recordWakeClip()
             _wakeBusyLabel.value = "Analysing on-device…"
             if (clip == null || clip.isEmpty()) {
+                android.util.Log.w("WakeEnroll", "No speech heard in the clip")
                 _wakeWordStatus.value = EndpointStatus(false, "No speech heard - say the wake phrase while recording")
             } else {
                 val features = extractWakeFeatures(clip)
+                // Every branch has to name itself in the log: an enrollment that
+                // reaches the screen but never lands in the file is invisible
+                // otherwise, and the count the screen shows is then not the count
+                // the matcher can use.
+                android.util.Log.w(
+                    "WakeEnroll",
+                    "Clip ${clip.size / 2} samples -> ${referenceFrameCount(features)} frames, limit $MAX_REFERENCE_FRAMES"
+                )
                 if (features.isEmpty()) {
+                    android.util.Log.w("WakeEnroll", "No wake features built from the clip")
                     _wakeWordStatus.value = EndpointStatus(false, "No speech found in the clip - speak the whole phrase")
                 } else if (referenceFrameCount(features) > MAX_REFERENCE_FRAMES) {
+                    android.util.Log.w("WakeEnroll", "Clip rejected - too many frames")
                     _wakeWordStatus.value = EndpointStatus(
                         false,
                         "Clip too long - keep the phrase under $MAX_REFERENCE_SECONDS seconds"
                     )
                 } else if (!saveWakeReference(appContext, features)) {
-                    _wakeWordStatus.value = EndpointStatus(false, "Could not save the reference")
+                    _wakeWordStatus.value = EndpointStatus(
+                        false,
+                        "Could not save the reference - the enrollment file is not writable",
+                    )
                 } else {
                     _wakeReferenceCount.value = loadWakeReferences(appContext).size
                     _wakeWordStatus.value = EndpointStatus(
@@ -658,31 +733,72 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     /**
      * Tests the on-device detector end to end: records a live clip and reports the
-     * dynamic time warping cost against the enrolled references. No endpoint is
-     * involved, so this is exactly the decision the wake service makes.
+     * same decision the wake service makes, with the cost and threshold that
+     * decision was taken against. No endpoint is involved.
      */
     fun runWakeWordTest() {
         val currentSettings = _settings.value
         _wakeWordTesting.value = true
         viewModelScope.launch {
             val references = loadWakeReferences(appContext)
+            // Every branch has to name itself in the log, or a test that produced
+            // no WakeMatch line at all leaves the adb reader guessing which of the
+            // three exits the taps actually took.
+            android.util.Log.w(
+                "WakeMatch",
+                "Test started against ${references.size} enrolled reference(s)"
+            )
             if (references.isEmpty()) {
+                android.util.Log.w("WakeMatch", "Test exit: enrollment empty")
                 _wakeWordStatus.value = EndpointStatus(false, "No references enrolled - record the wake phrase first")
             } else {
                 _wakeBusyLabel.value = "Recording…"
                 val clip = recordWakeClip()
                 _wakeBusyLabel.value = "Matching on-device…"
                 if (clip == null || clip.isEmpty()) {
+                    // The recorder answers with nothing when the VAD never heard
+                    // speech, so a miss here means the mic never got the phrase -
+                    // the wake loop holding the same mic is the prime suspect.
+                    android.util.Log.w(
+                        "WakeMatch",
+                        "Test exit: no speech in the clip (${clip?.size ?: 0} samples)"
+                    )
                     _wakeWordStatus.value = EndpointStatus(false, "No speech heard - say the wake phrase while testing")
                 } else {
-                    val cost = bestMatchCost(extractWakeFeatures(clip), references)
-                    val threshold = wakeCostThreshold(currentSettings.wakeWordSensitivity, references)
+                    val features = extractWakeFeatures(clip)
+                    // The verdict has to come from the same decision the wake loop
+                    // makes, or a test that passes would not predict the device.
+                    val heard = wakeWordHeard(features, references, currentSettings.wakeWordSensitivity)
+                    val cost = formatCost(bestMatchCost(features, references))
+                    val threshold = formatCost(wakeCostThreshold(currentSettings.wakeWordSensitivity, references))
+                    // The best cost alone cannot explain a miss: one enrolled take
+                    // that is not really the phrase (a cough, a half-spoken warm-up)
+                    // costs far above the bar forever, and no sensitivity can reach
+                    // it while the honest takes still match each other. Scoring every
+                    // take separately names the one to record over, which is the only
+                    // way the user can act on a miss.
+                    val scores = references.map { formatCost(bestMatchCost(features, listOf(it))) }
+                    val scoreLine = scores.joinToString(" ")
+                    // The cost is not the whole story: a take can sit under the bar
+                    // and still confirm on too few window positions to vote. Naming
+                    // each take's confirming windows against its own bound is what
+                    // makes that failure actionable, and the log line is what makes
+                    // it readable from adb without the screen in front of the user.
+                    val agreementLine = wakeAgreement(features, references, currentSettings.wakeWordSensitivity).joinToString(" ")
+                    // A take enrolled with far more frames than the live clip is
+                    // compared against a window of the clip's own length, so its
+                    // length is the second quantity that explains a cost.
+                    val takeFrames = references.map { referenceFrameCount(it) }.joinToString(" ")
+                    android.util.Log.w(
+                        "WakeMatch",
+                        "clip ${referenceFrameCount(features)} frames, takes $takeFrames frames, cost $cost, threshold $threshold, take by take $scoreLine, agreement $agreementLine -> ${if (heard) "MATCH" else "NO MATCH"}"
+                    )
                     _wakeWordStatus.value = EndpointStatus(
-                        cost <= threshold,
-                        if (cost <= threshold)
-                            "Matched '${currentSettings.wakeWordName}' on-device (cost ${formatCost(cost)} <= ${formatCost(threshold)})"
+                        heard,
+                        if (heard)
+                            "Matched '${currentSettings.wakeWordName}' on-device (cost $cost, threshold $threshold)"
                         else
-                            "No match (cost ${formatCost(cost)} > ${formatCost(threshold)}) - raise sensitivity or record the phrase again"
+                            "No match (cost $cost, threshold $threshold) - take by take: $scoreLine, agreement: $agreementLine. Clear and re-record the takes that miss."
                     )
                 }
             }
@@ -691,8 +807,11 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     /**
-     * One decimal is enough to tell how far a clip was from the threshold.
+     * Two decimals, not one: the whole sensitivity slider spans 0.377 to 0.448, and a
+     * one-decimal truncation prints both ends as "0.3" - exactly the comparison the
+     * costs above it have to be read against.
      */
     private fun formatCost(value: Float): String =
-        if (value >= Float.MAX_VALUE / 2.0f) "no match" else ((value * 10.0f).toInt() / 10.0f).toString()
+        if (value >= Float.MAX_VALUE / 2.0f) "no match"
+        else ((value * 100.0f).toInt() / 100.0f).toString()
 }

@@ -19,7 +19,10 @@ import com.localassistant.app.ui.common.loadWakeReferences
 import com.localassistant.app.ui.common.playWakeCue
 import com.localassistant.app.ui.common.playTTSAudio
 import com.localassistant.app.ui.common.recordAudioWithVAD
+import com.localassistant.app.ui.common.referenceFrameCount
+import com.localassistant.app.ui.common.wakeAgreement
 import com.localassistant.app.ui.common.wakeCostThreshold
+import com.localassistant.app.ui.common.wakeWordHeard
 import com.localassistant.app.ui.common.voiceInteractionBound
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.*
@@ -103,6 +106,13 @@ class WakeChatService : VoiceInteractionService() {
         // long a manually triggered exchange may wait for the clip already in
         // flight, which is why the debug trigger opens within a beat.
         private const val WAKE_IDLE_SECONDS = 4
+        // Hard ceiling on one wake clip. The idle pass only gives up while NO
+        // speech has been heard, so a room whose ambient noise clears the energy
+        // threshold never looks silent: the clip then runs to the recorder's own
+        // default and the matcher scores a minute of room. That clip is both
+        // expensive and useless - the phrase is a beat long - so the ceiling is
+        // what keeps the loop honest.
+        private const val WAKE_CLIP_SECONDS = 10
         // How long one frame of the card's climb from the bottom edge lasts. The
         // number of frames is [RISE_FRAMES], the same count the session counts its
         // climb in, so the two halves cannot drift apart.
@@ -198,6 +208,12 @@ class WakeChatService : VoiceInteractionService() {
     // notification for the whole answer.
     @Volatile
     private var sessionFailures = 0
+
+    // The enrollment is described once per listening session: its references are
+    // fixed for that session, and the pairwise costs it needs are the same DTW
+    // the wake pass runs, so repeating them on every idle clip is pure waste.
+    @Volatile
+    private var enrollmentDiagnosed = false
 
     // Coroutine scope for the listening loop. cancel() permanently finishes a
     // scope, so stopListening() replaces it with a fresh one before the next start.
@@ -356,6 +372,7 @@ class WakeChatService : VoiceInteractionService() {
         endExchange()
         _phase.value = PHASE_IDLE
         serviceScope = newServiceScope()
+        enrollmentDiagnosed = false
     }
 
     /**
@@ -439,6 +456,7 @@ class WakeChatService : VoiceInteractionService() {
                 // stop signal, so letting go of a clip of quiet room does not look
                 // like stopping the service.
                 stopSignal = wakeAbortSignal,
+                maxSeconds = WAKE_CLIP_SECONDS,
                 noSpeechTimeoutMs = WAKE_IDLE_SECONDS * 1000L
             )
         }
@@ -464,9 +482,42 @@ class WakeChatService : VoiceInteractionService() {
             return false
         }
 
+        if (!enrollmentDiagnosed) {
+            enrollmentDiagnosed = true
+            // What the enrollment actually is, before any clip is scored against it.
+            // Genuine takes of one phrase sit a third of the scale apart; references
+            // that are near-identical are several captures of one audio source, and
+            // references from an older feature layout cost MAX_VALUE everywhere.
+            val pairwise = mutableListOf<Float>()
+            for (i in references.indices) {
+                for (j in (i + 1)..<references.size) {
+                    pairwise += bestMatchCost(references[i], listOf(references[j]))
+                }
+            }
+            pairwise.sort()
+            val spread = if (pairwise.isEmpty()) Float.NaN else pairwise[pairwise.size / 2]
+            android.util.Log.d(
+                "WakeChatService",
+                "Enrollment: ${references.size} references, " +
+                    "frames " + references.map { referenceFrameCount(it) }.joinToString(",") + ", " +
+                    "median pairwise cost ${formatCost(spread)}"
+            )
+        }
+
         val features = extractWakeFeatures(clip)
-        val cost = bestMatchCost(features, references)
-        if (features.isEmpty() || cost > wakeCostThreshold(currentSettings.wakeWordSensitivity, references)) {
+        if (!wakeWordHeard(features, references, currentSettings.wakeWordSensitivity)) {
+            // The idle pass gets the same breakdown the Settings test prints. A single
+            // aggregate number cannot say which input is at fault: an enrollment whose
+            // references all cost the same high value is a different problem from one
+            // bad take, and both look identical from the median alone.
+            android.util.Log.d(
+                "WakeChatService",
+                "Wake clip rejected: clip ${referenceFrameCount(features)} frames, " +
+                    "takes " + references.map { referenceFrameCount(it) }.joinToString(",") + " frames, " +
+                    "costs " + references.map { formatCost(bestMatchCost(features, listOf(it))) }.joinToString(",") + ", " +
+                    "agreement " + wakeAgreement(features, references, currentSettings.wakeWordSensitivity).joinToString(" ") + ", " +
+                    "threshold ${formatCost(wakeCostThreshold(currentSettings.wakeWordSensitivity, references))}"
+            )
             _phase.value = PHASE_DETECTING
             return false
         }
@@ -887,6 +938,13 @@ class WakeChatService : VoiceInteractionService() {
         PHASE_ERROR -> "Something went wrong"
         else -> "Idle"
     }
+
+    // Two decimals, not one: the whole sensitivity slider spans 0.377 to 0.448, and a
+    // one-decimal truncation prints both ends as "0.3" - exactly the comparison the
+    // costs above it have to be read against.
+    private fun formatCost(value: Float): String =
+        if (value >= Float.MAX_VALUE / 2.0f) "no match"
+        else ((value * 100.0f).toInt() / 100.0f).toString()
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
