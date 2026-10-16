@@ -183,6 +183,13 @@ The service logs its own phase, so `adb logcat` filtered on the class name is th
 adb logcat | grep WakeChat
 ```
 
+### Reading The Wake Path
+The whole detection pipeline - microphone capture, the cut to the utterance, MFCC features, the
+band-limited DTW match against your own recorded references, the threshold and the idle listening
+loop - is documented in [`docs/wake-word-pipeline.md`](docs/wake-word-pipeline.md). It names every
+constant and why it has that value, the log tags to filter on, and what a healthy enrollment looks
+like when a wake word refuses to fire.
+
 ## Project Structure
 
 ```

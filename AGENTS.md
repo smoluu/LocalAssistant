@@ -82,6 +82,11 @@ Device launch/install commands are in `AGENTS.local.md`.
 ## Deep details — read on demand (not loaded with this file)
 These are deliberately **not** inlined here. Read them with file tools when the task needs them;
 never paste them back into this guide.
+- `docs/wake-word-pipeline.md` - the wake path end to end: capture → cut → MFCC → band-limited DTW →
+  threshold → idle loop, every constant and why it has that value, the log tags and what a healthy
+  enrollment looks like in them, and the traps. **Read this before touching any part of the wake
+  path** - the stages are calibrated to each other, so a change in one is only correct if it is
+  mirrored in the others.
 - `.qwen/skills/localassistant-deep-dive/SKILL.md` - the device-verified gotcha log: the wake matcher,
   the `VoiceInteractionService`/`VoiceInteractionSessionService` platform path, session window sizing,
   TTS and SSE pitfalls, and this toolchain's API limits. Auto-loaded when Kotlin files are touched.
