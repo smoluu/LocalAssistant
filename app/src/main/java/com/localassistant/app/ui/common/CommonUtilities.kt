@@ -154,11 +154,10 @@ fun recordAudioWithVAD(
 
     var speechDetected = false
     var lastSpeechTime: Long = 0
-    // Sample offsets of the first and last voiced chunk, so the returned clip
-    // can be cut to the utterance itself.
-    var firstSpeechSample = -1
-    var lastSpeechSample = -1
-    val minEnergy = 800 // Higher threshold to avoid background noise
+    // This absolute energy only gates "did anything happen at all" and the
+    // silence break. It must not decide where the utterance starts and ends:
+    // see voicedSpan, which cuts on the clip's own loudness instead.
+    val minEnergy = 800
     val recordingStart = System.currentTimeMillis()
 
     android.util.Log.d("VAD", "Starting recording with energy threshold $minEnergy...")
@@ -203,15 +202,12 @@ fun recordAudioWithVAD(
 
             // Reset hasSpeechInChunk based on RMS energy, not individual samples
             var hasSpeechInChunk = rms > minEnergy
-            val chunkStartSample = audioBuffers.size
 
             android.util.Log.d("VAD", "Chunk $chunkCount: bytesRead=$bytesRead, RMS=$rms, speechDetected=$speechDetected")
 
             if (hasSpeechInChunk) {
                 lastSpeechTime = System.currentTimeMillis()
                 speechDetected = true
-                if (firstSpeechSample < 0) firstSpeechSample = chunkStartSample
-                lastSpeechSample = chunkStartSample + bytesRead
 
                 if (chunkCount % 160 == 0 && !stopSignal.get()) {
                     android.util.Log.d("VAD", "Recording... ${audioBuffers.size / 16000}s, RMS=$rms")
@@ -249,13 +245,20 @@ fun recordAudioWithVAD(
         return null
     }
 
-    // Cut to the utterance: a short margin on either side keeps the plosives
-    // at the edges, while the silent room around them would otherwise be
-    // carried into the wake matcher as noise.
+    // Cut to the utterance. The cut is keyed to the clip's OWN loudest window,
+    // not to the absolute RMS that gated the loop: the matcher normalises gain
+    // before it compares anything, so an absolute cut is not on the same scale
+    // as the features it feeds. Measured on the tab, the same phrase spoken at
+    // arm's length fell under that absolute cut and kept only its loudest
+    // fraction of a second - live clips of 71-139 frames against enrolled takes
+    // of 135-223 - and that length gap alone scored a genuine phrase at 0.41-0.59
+    // against a 0.38 bar. The margins stay because they carry the plosives at the
+    // edges of the phrase.
     val leadSamples = sampleRate * 3 / 10
     val trailSamples = sampleRate / 2
-    val from = (firstSpeechSample - leadSamples).coerceAtLeast(0)
-    val to = (lastSpeechSample + trailSamples).coerceAtMost(audioBuffers.size)
+    val (voicedFrom, voicedTo) = voicedSpan(audioBuffers, buffer.size, VOICED_TRIM_FRACTION)
+    val from = kotlin.math.max(0, voicedFrom - leadSamples)
+    val to = kotlin.math.min(audioBuffers.size, voicedTo + trailSamples)
     if (to <= from) return null
 
     // Convert to WAV format (little-endian PCM)
@@ -267,6 +270,67 @@ fun recordAudioWithVAD(
     }
 
     return convertPcmToWav(pcmBytes, sampleRate)
+}
+
+/**
+ * Fraction of a clip's loudest window above which a window counts as voiced
+ * when cutting a clip to its utterance. Deliberately well below the peak: the
+ * cut has to keep the whole phrase, and the quiet syllables of a phrase sit a
+ * long way under its loudest window.
+ */
+const val VOICED_TRIM_FRACTION = 0.25
+
+/**
+ * Sample offsets of the utterance inside [samples], keyed to the clip's own
+ * loudest window instead of to an absolute energy.
+ *
+ * Scaling every sample by any positive factor leaves this span untouched, which
+ * is the property the wake path needs: enrollment and the live pass are one and
+ * the same phrase at different loudness, and a cut that moves with loudness
+ * hands the matcher two clips of different lengths for the same utterance.
+ *
+ * Returns the whole buffer when there is no signal to key the cut to, so the
+ * caller's own "was anything heard" gate stays the thing that answers silence.
+ */
+fun voicedSpan(
+    samples: MutableList<Short>,
+    window: Int,
+    voicedFraction: Double
+): Pair<Int, Int> {
+    val total = samples.size
+    if (total == 0 || window <= 0) return Pair(0, 0)
+
+    val levels = mutableListOf<Double>()
+    var peak = 0.0
+    var start = 0
+    while (start + window <= total) {
+        var energy = 0.0
+        for (i in start..<(start + window)) {
+            val v = samples[i].toDouble()
+            energy += v * v
+        }
+        val level = kotlin.math.sqrt(energy / window)
+        levels.add(level)
+        if (level > peak) peak = level
+        start += window
+    }
+    if (peak <= 0.0) return Pair(0, total)
+
+    val limit = peak * voicedFraction
+    var firstWindow = -1
+    var lastWindow = -1
+    for (i in levels.indices) {
+        if (levels[i] > limit) {
+            if (firstWindow < 0) firstWindow = i
+            lastWindow = i
+        }
+    }
+    if (firstWindow < 0) return Pair(0, total)
+
+    return Pair(
+        firstWindow * window,
+        kotlin.math.min(total, (lastWindow + 1) * window)
+    )
 }
 
 /**
