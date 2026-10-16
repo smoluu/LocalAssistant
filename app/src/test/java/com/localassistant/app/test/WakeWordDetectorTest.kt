@@ -3,8 +3,11 @@ package com.localassistant.app.test
 import com.localassistant.app.ui.common.bestMatchCost
 import com.localassistant.app.ui.common.convertPcmToWav
 import com.localassistant.app.ui.common.extractWakeFeatures
+import com.localassistant.app.ui.common.parseWavBytes
 import com.localassistant.app.ui.common.mfcc
 import com.localassistant.app.ui.common.wakeCostThreshold
+import com.localassistant.app.ui.common.wakeWordHeard
+import com.localassistant.app.ui.common.confirmingWindows
 import org.junit.Test
 
 /**
@@ -70,6 +73,15 @@ class WakeWordDetectorTest {
 
     private fun framesOf(features: FloatArray): Int = features.size / 8
 
+    // Joins two clips the way the idle recorder does when the user says the
+    // phrase and the request without pausing: one clip holding both.
+    private fun concatPcm(first: ByteArray, second: ByteArray): ByteArray {
+        val out = ByteArray(first.size + second.size)
+        for (i in first.indices) out[i] = first[i]
+        for (i in second.indices) out[first.size + i] = second[i]
+        return out
+    }
+
     @Test
     fun mfcc_emitsOneFeatureVectorPerTenMsFrame() {
         val features = mfcc(pcmToFloats(sinePcm(16000, 8000, 320)))
@@ -119,6 +131,18 @@ class WakeWordDetectorTest {
         val atSixteenK = extractWakeFeatures(convertPcmToWav(speechPcm(16000, 8000, 2000), 16000))
         assert(framesOf(atEightK) == framesOf(atSixteenK)) {
             "8 kHz audio was not resampled to the detector's frame grid"
+        }
+    }
+
+    @Test
+    fun extractWakeFeatures_resamplesHigherSampleRates() {
+        // The resample multiplies the sample count by 16000, which overflows
+        // Int32 past ~134 k samples - three seconds at 48 kHz is exactly that,
+        // and a WAV of the user's own recording can arrive at that rate.
+        val atFortyEightK = extractWakeFeatures(convertPcmToWav(speechPcm(144000, 8000, 6000), 48000))
+        val atSixteenK = extractWakeFeatures(convertPcmToWav(speechPcm(48000, 8000, 2000), 16000))
+        assert(framesOf(atFortyEightK) == framesOf(atSixteenK)) {
+            "48 kHz audio did not land on the same frame grid as 16 kHz: $atFortyEightK frames vs $atSixteenK"
         }
     }
 
@@ -174,7 +198,7 @@ class WakeWordDetectorTest {
         val lenient = wakeCostThreshold(0.0f, references)
         val strict = wakeCostThreshold(1.0f, references)
         assert(lenient > strict) { "the loosest setting must accept a wider cost than the strictest" }
-        assert(strict >= 0.5f) { "the strictest setting fell below the minimum tolerance" }
+        assert(strict >= 0.2f) { "the strictest setting fell below the minimum tolerance" }
         assert(wakeCostThreshold(-1.0f, references) == lenient) { "sensitivity below zero was not clamped" }
         assert(wakeCostThreshold(2.0f, references) == strict) { "sensitivity above one was not clamped" }
     }
@@ -187,8 +211,10 @@ class WakeWordDetectorTest {
         val single = listOf(mfcc(pcmToFloats(sinePcm(4000, 7000, 250))))
         val lenient = wakeCostThreshold(0.0f, single)
         assert(lenient > wakeCostThreshold(1.0f, single)) { "a single reference left no tolerance at all" }
-        assert(lenient < 10.0f) { "the fallback spread was not in normalised units" }
-        assert(wakeCostThreshold(1.0f, emptyList()) >= 0.5f) {
+        // The frame distance is capped at 2, so no honest threshold can sit near
+        // the tens-of-raw-magnitude scale the first implementation used.
+        assert(lenient < 3.0f) { "the fallback spread was not in normalised units" }
+        assert(wakeCostThreshold(1.0f, emptyList()) >= 0.2f) {
             "no references produced a threshold below the minimum tolerance"
         }
     }
@@ -207,6 +233,147 @@ class WakeWordDetectorTest {
         val unrelatedCost = bestMatchCost(mfcc(pcmToFloats(clean)), listOf(mfcc(pcmToFloats(unrelated))))
         assert(noiseCost < unrelatedCost) {
             "broadband noise was not filtered out: noise cost $noiseCost, unrelated cost $unrelatedCost"
+        }
+    }
+
+    @Test
+    fun bestMatchCost_findsThePhraseInsideALongerClip() {
+        // The idle pass trims to the whole utterance, so a user who says the
+        // phrase and then the request without pausing hands the matcher a clip
+        // longer than any reference. Warping the whole clip onto the reference
+        // buries the request in the cost and the trigger misses - the window has
+        // to be able to sit on the phrase alone.
+        val phrase = speechPcm(4000, 7000, 250)
+        val reference = mfcc(pcmToFloats(phrase))
+        val embedded = mfcc(pcmToFloats(concatPcm(phrase, speechPcm(6000, 5000, 131))))
+        val embeddedCost = bestMatchCost(embedded, listOf(reference))
+        val unrelated = mfcc(pcmToFloats(speechPcm(4000, 7000, 97)))
+        val unrelatedCost = bestMatchCost(embedded, listOf(unrelated))
+        assert(embeddedCost < unrelatedCost) {
+            "the phrase inside a longer clip cost $embeddedCost against its reference, unrelated cost $unrelatedCost"
+        }
+        assert(embeddedCost <= wakeCostThreshold(0.5f, listOf(reference))) {
+            "the phrase inside a longer clip cost $embeddedCost, the mid sensitivity accepts ${wakeCostThreshold(0.5f, listOf(reference))}"
+        }
+    }
+
+    // The sine fixtures share too much structure for any threshold to separate,
+    // so the precision and recall cases run over the recording the app bundles:
+    // real speech is the only thing the matcher has to tell apart on the device.
+    private fun realFeatures(fromSecond: Double, durationSecond: Double): FloatArray {
+        var path = java.io.File(".").absolutePath
+        var pcm = ByteArray(0)
+        while (true) {
+            val candidate = java.io.File("$path/app/src/main/assets/voice_clone.wav")
+            if (candidate.exists()) {
+                val parsed = parseWavBytes(candidate.readBytes())
+                if (parsed != null && parsed.first > 0 && parsed.second != null) {
+                    // The fixture is 48 kHz stereo; the detector wants mono 16 kHz,
+                    // so keep the left channel and every third frame.
+                    val stride = kotlin.math.max(1, parsed.first / 16000)
+                    val frames = (parsed.second!!.size / 4) / stride
+                    val mono = ByteArray(frames * 2)
+                    for (i in 0..<frames) {
+                        val src = i * stride * 4
+                        mono[i * 2] = parsed.second!![src]
+                        mono[i * 2 + 1] = parsed.second!![src + 1]
+                    }
+                    val rate = 16000
+                    val available = frames
+                    val startSample = kotlin.math.max(0, kotlin.math.min((fromSecond * rate).toInt(), available))
+                    val count = kotlin.math.max(0, kotlin.math.min((durationSecond * rate).toInt(), available - startSample))
+                    val out = ByteArray(count * 2)
+                    for (i in 0..<count) {
+                        out[i * 2] = mono[(startSample + i) * 2]
+                        out[i * 2 + 1] = mono[(startSample + i) * 2 + 1]
+                    }
+                    pcm = convertPcmToWav(out, rate)
+                }
+                break
+            }
+            val cut = path.lastIndexOf('/')
+            if (cut <= 0) break
+            path = path.substring(0, cut)
+        }
+        return extractWakeFeatures(pcm)
+    }
+
+    @Test
+    fun wakeWordHeard_doesNotFireOnUnrelatedRealSpeech() {
+        // A window is what buys the recall below, and a window is also what could
+        // hand back a false trigger: the best of many positions is cheap even for
+        // speech that cannot be the phrase, so the cost alone cannot decide. What
+        // decides is how many positions agree, which one lucky alignment cannot
+        // fake. Measured on the bundled recording, unrelated speech confirms on
+        // nothing until the threshold reaches ~0.5.
+        val reference = realFeatures(0.0, 1.2)
+        val unrelated = realFeatures(3.0, 3.0)
+        assert(reference.isNotEmpty() && unrelated.isNotEmpty()) { "the bundled speech fixture is unusable" }
+        assert(!wakeWordHeard(unrelated, listOf(reference), 0.5f)) {
+            "unrelated speech fired the wake word at the middle of the sensitivity slider"
+        }
+        assert(!wakeWordHeard(unrelated, listOf(reference), 0.0f)) {
+            "even the most sensitive setting fired on speech that cannot be the phrase"
+        }
+    }
+
+    @Test
+    fun wakeWordHeard_firesOnThePhraseInsideALongerRealClip() {
+        // The recall half of the same decision: the idle pass hands over the whole
+        // utterance, so the phrase sitting inside a longer clip has to fire at
+        // every sensitivity, including the strictest.
+        val reference = realFeatures(0.0, 1.2)
+        val embedded = realFeatures(0.0, 3.0)
+        assert(reference.isNotEmpty() && embedded.isNotEmpty()) { "the bundled speech fixture is unusable" }
+        assert(wakeWordHeard(embedded, listOf(reference), 1.0f)) {
+            "the strictest setting missed the phrase inside a longer clip"
+        }
+        assert(wakeWordHeard(embedded, listOf(reference), 0.5f)) {
+            "the middle of the slider missed the phrase inside a longer clip"
+        }
+    }
+
+    @Test
+    fun confirmingWindows_separateRealSpeechAtEverySensitivity() {
+        // The gap the decision is built on: the genuine clip keeps confirming over
+        // window positions where the unrelated one has none, across the whole
+        // sensitivity slider.
+        val reference = realFeatures(0.0, 1.2)
+        val embedded = realFeatures(0.0, 3.0)
+        val unrelated = realFeatures(3.0, 3.0)
+        assert(reference.isNotEmpty() && embedded.isNotEmpty() && unrelated.isNotEmpty()) {
+            "the bundled speech fixture is unusable"
+        }
+        for (sensitivity in listOf(0.0f, 0.5f, 1.0f)) {
+            val threshold = wakeCostThreshold(sensitivity, listOf(reference))
+            val genuine = confirmingWindows(embedded, reference, threshold)
+            val other = confirmingWindows(unrelated, reference, threshold)
+            assert(genuine > other) {
+                "at sensitivity $sensitivity unrelated speech confirmed on $other window positions, the phrase inside a longer clip on $genuine"
+            }
+            // The measured margin, not just its sign: unrelated speech has no
+            // cheap window at all below the precision cliff, while the genuine
+            // clip clears the agreement bound the decision asks for.
+            assert(other == 0) {
+                "at sensitivity $sensitivity unrelated speech confirmed on $other window positions, expected none below the precision cliff"
+            }
+            assert(genuine >= 2) {
+                "at sensitivity $sensitivity the genuine clip confirmed on only $genuine positions, too few to agree on"
+            }
+        }
+    }
+
+    @Test
+    fun bestMatchCost_isNotWonByASingleFlatteringReference() {
+        // Enrolling more takes must not make the detector more permissive: a clip
+        // that flatters only one of several references is not the phrase.
+        val phrase = mfcc(pcmToFloats(speechPcm(4000, 7000, 250)))
+        val lucky = mfcc(pcmToFloats(speechPcm(4000, 7000, 131)))
+        val other = mfcc(pcmToFloats(speechPcm(4000, 7000, 97)))
+        val againstThree = bestMatchCost(lucky, listOf(phrase, lucky, other))
+        val againstOnlyTheLuckyOne = bestMatchCost(lucky, listOf(lucky))
+        assert(againstThree > againstOnlyTheLuckyOne) {
+            "one flattering reference still decided the answer: three references cost $againstThree, the single one $againstOnlyTheLuckyOne"
         }
     }
 }

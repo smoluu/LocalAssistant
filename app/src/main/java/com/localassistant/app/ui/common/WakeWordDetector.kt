@@ -1,6 +1,7 @@
 package com.localassistant.app.ui.common
 
 import android.content.Context
+import android.util.Log
 import java.io.File
 
 /**
@@ -23,9 +24,21 @@ const val MAX_REFERENCE_FRAMES = 500
 const val MAX_REFERENCE_SECONDS = MAX_REFERENCE_FRAMES * MFCC_SHIFT / 16000
 private const val MAX_REFERENCES = 8
 // Floor so identical enrollments (spread 0) still leave a little tolerance.
-private const val MIN_MATCH_THRESHOLD = 0.5f
-// Fallback spread when fewer than two references are enrolled, in normalised units.
-private const val SINGLE_REFERENCE_SPREAD = 1.5f
+private const val MIN_MATCH_THRESHOLD = 0.2f
+// Fallback spread when fewer than two references are enrolled, in normalised
+// units. Measured enrollment of the same phrase spreads over ~0.02, so this
+// only has to cover a lone take that was recorded carelessly.
+private const val SINGLE_REFERENCE_SPREAD = 0.25f
+// Cost a clip may reach at the middle of the sensitivity slider. Measured on
+// the user's own enrollment: five takes of the phrase sit 0.30-0.40 apart, the
+// phrase inside a 24 s recording costs 0.35-0.37 against them, and unrelated
+// speech from another recording 0.48-0.53. The boundary therefore belongs around
+// 0.40, with recall needing ~0.36 and precision giving back at ~0.55.
+private const val MATCH_COST = 0.40f
+// Most of the threshold that enrollment variation is allowed to add. Kept small
+// on evidence: widening it for a loose enrollment is what pushes the bar past
+// the precision cliff, and the cliff is only 0.15 above the recall floor.
+private const val SPREAD_ALLOWANCE = 0.02f
 private const val REFERENCE_FILE = "wake_references.txt"
 // Samples are rescaled to this peak so enrollment and detection see the same
 // loudness whatever the microphone gain, the distance, or the volume was.
@@ -42,6 +55,29 @@ private const val VOICED_FRACTION = 0.35f
 private const val QUIET_FRACTION = 0.12f
 private const val MIN_SPEECH_FRAMES = 3
 private const val MIN_QUIET_FRAMES = 2
+// How far the warping path may stray from the diagonal, in frames. A phrase may
+// be spoken faster or slower than an enrolled take, but it may not be stretched
+// over unrelated speech: this is what keeps a windowed match from sliding a
+// short reference across a long clip.
+private const val BAND_SIZE = 5
+// Where in the sorted per-reference costs the final cost is taken. Below three
+// references this lands on the best one; from three on it lands on the median,
+// so one lucky reference can no longer fire the wake word on its own.
+private const val REFERENCE_PERCENTILE = 0.5f
+// How many window positions must agree before the wake word counts as heard.
+// Taking the best of every window is biased: an unrelated clip gets several
+// chances to land one cheap window, while a genuine phrase confirms over a run
+// of consecutive positions because the band absorbs the shift. Counting the
+// agreements is what removes that bias, the same confirmation rustpotter calls
+// min_scores.
+//
+// Measured over real speech, the agreement counts are nowhere near this bound:
+// unrelated speech confirms on nothing at all up to a cost of ~0.5, while the
+// phrase inside a longer clip confirms on 5 positions even at the strictest
+// threshold. So the count only has to rule out a single lucky alignment -
+// pushing it higher would trade recall for precision the calibrated threshold
+// already provides, and a carelessly enrolled take can drop the genuine count.
+private const val MIN_CONFIRMING_WINDOWS = 2
 
 /**
  * Extracts the MFCC feature vectors of a WAV clip, returning an empty array when
@@ -74,10 +110,12 @@ private fun pcmToFloats(pcmBytes: ByteArray, sampleRate: Int): FloatArray {
     }
     if (sampleRate == 16000 || sampleRate <= 0) return out
 
-    val target = out.size * 16000 / sampleRate
+    // A few seconds at 48 kHz is already past 134 k samples, so both products
+    // here exceed Int32 and would hand a negative length to FloatArray.
+    val target = (out.size.toLong() * 16000 / sampleRate).toInt()
     val resampled = FloatArray(target)
     for (i in 0..<target) {
-        resampled[i] = out[i * sampleRate / 16000]
+        resampled[i] = out[(i.toLong() * sampleRate / 16000).toInt()]
     }
     return resampled
 }
@@ -340,90 +378,310 @@ private fun gaussianSmooth(source: FloatArray, frameCount: Int, stride: Int): Fl
 }
 
 /**
- * Dynamic time warping cost between two feature sequences, normalised by the
- * length of the best path. Lower means more similar; an empty sequence on
- * either side yields [Float.MAX_VALUE] so it can never match.
+ * The cost of a clip against the enrolled references: the best window of the
+ * clip that holds the phrase, warped onto each reference, and then aggregated
+ * across the references.
+ *
+ * Warping the whole clip onto the whole reference - what the first
+ * implementation did - is what makes the trigger miss when the user says the
+ * phrase and the request in one breath: the request has nowhere to go and its
+ * cost is folded into the answer. Scoring a window the length of the references
+ * and taking the best position lets the window sit exactly on the phrase while
+ * the rest of the clip is ignored, which is the difference the idle pass needs
+ * because its recorder trims to the whole utterance, not to the phrase.
+ *
+ * Lower means more similar; an empty clip or missing references yield
+ * [Float.MAX_VALUE] so they can never match.
  */
 fun bestMatchCost(features: FloatArray, references: List<FloatArray>): Float {
     if (features.isEmpty() || references.isEmpty()) return Float.MAX_VALUE
 
-    var best = Float.MAX_VALUE
-    for (reference in references) {
-        if (reference.isEmpty()) continue
-        val cost = dtwCost(features, reference)
-        if (cost < best) best = cost
+    val usable = references.filter { it.size >= MFCC_FEATURES && it.size % MFCC_FEATURES == 0 }
+    if (usable.isEmpty()) return Float.MAX_VALUE
+    val clipFrames = features.size / MFCC_FEATURES
+    if (clipFrames == 0) return Float.MAX_VALUE
+
+    val perReference = mutableListOf<Float>()
+    for (reference in usable) {
+        val refFrames = reference.size / MFCC_FEATURES
+        var best = Float.MAX_VALUE
+        // The longer sequence is the one that gets sliced, so an enrolled take
+        // that outlasts the live clip is compared against the whole clip the
+        // same way a longer clip is compared against a whole reference. Slicing
+        // only the clip leaves one position for every reference that outlasts
+        // it, and the band then has to warp the whole length difference into
+        // the cost - which is how a genuine enrollment scores a real phrase.
+        if (clipFrames >= refFrames) {
+            for (start in 0..(clipFrames - refFrames)) {
+                // A window can only improve on what is already known about this
+                // reference, so its search stops as soon as it is worse.
+                val cost = windowCost(features, start, refFrames, reference, best)
+                if (cost < best) best = cost
+            }
+        } else {
+            for (start in 0..(refFrames - clipFrames)) {
+                val cost = windowCost(reference, start, clipFrames, features, best)
+                if (cost < best) best = cost
+            }
+        }
+        perReference += best
     }
-    return best
+    return aggregateCost(perReference)
 }
 
-private fun dtwCost(a: FloatArray, b: FloatArray): Float {
-    val n = a.size / MFCC_FEATURES
-    val m = b.size / MFCC_FEATURES
-    if (n == 0 || m == 0) return Float.MAX_VALUE
+/**
+ * Number of window positions in [features] whose cost against [reference] is at
+ * or below [threshold].
+ *
+ * A single position is not evidence: the search over positions is exactly what
+ * makes an unrelated clip look close, so the count of agreeing positions is the
+ * quantity that separates a real phrase from one lucky alignment.
+ */
+fun confirmingWindows(features: FloatArray, reference: FloatArray, threshold: Float): Int {
+    if (features.isEmpty() || reference.isEmpty()) return 0
+    val clipFrames = features.size / MFCC_FEATURES
+    val refFrames = reference.size / MFCC_FEATURES
+    if (clipFrames == 0 || refFrames == 0) return 0
+    var hits = 0
+    if (clipFrames >= refFrames) {
+        for (start in 0..(clipFrames - refFrames)) {
+            // The threshold doubles as the search limit: a window that cannot beat
+            // it is reported as unreachable and never counted.
+            if (windowCost(features, start, refFrames, reference, threshold) <= threshold) hits++
+        }
+    } else {
+        // The enrolled take outlasts the clip, so the take is what gets sliced.
+        for (start in 0..(refFrames - clipFrames)) {
+            if (windowCost(reference, start, clipFrames, features, threshold) <= threshold) hits++
+        }
+    }
+    return hits
+}
+
+/**
+ * Whether the clip holds the wake phrase.
+ *
+ * The cost alone cannot answer this. Taking the best of every window position
+ * hands an unrelated clip as many chances to land one cheap window as there are
+ * positions to try, and on real speech that bias is large: unrelated segments
+ * score ~0.49 through the search against ~0.62 for an honest pairwise
+ * comparison, which is closer to a genuine 0.18 than it should be. Requiring
+ * several positions to agree takes that back off - a genuine phrase confirms
+ * over a run of consecutive positions, because the band absorbs the shift
+ * between them, while a single lucky window does not confirm on its neighbours.
+ *
+ * A majority of the enrolled references has to confirm, so enrolling more takes
+ * cannot make the detector more permissive.
+ *
+ * The agreement bound only applies where there is more than one position to
+ * agree over. The idle pass trims the clip to the utterance, so a live clip is
+ * about as long as the references and the window has a single position to sit
+ * in - demanding two of them is what made every tight clip miss, because the
+ * count can never reach the bound no matter how good the cost is. With one
+ * position there is no best-of-N bias left to rule out, and the calibrated
+ * absolute threshold carries the decision alone.
+ */
+fun wakeWordHeard(features: FloatArray, references: List<FloatArray>, sensitivity: Float): Boolean {
+    val usable = references.filter { it.size >= MFCC_FEATURES && it.size % MFCC_FEATURES == 0 }
+    if (features.isEmpty() || usable.isEmpty()) return false
+    val threshold = wakeCostThreshold(sensitivity, references)
+    val votes = agreement(features, usable, threshold).count { it.first >= it.second }
+    return votes * 2 >= usable.size
+}
+
+/**
+ * The per-reference agreement the wake decision is built from: each usable
+ * reference's confirming window count paired with the bound it has to clear.
+ *
+ * Exposed as data rather than as a verdict so a miss can be traced to the
+ * enrolled take that cannot confirm - the aggregate cost alone cannot show
+ * which of several takes is the one to record over.
+ */
+private fun agreement(features: FloatArray, usable: List<FloatArray>, threshold: Float): List<Pair<Int, Int>> {
+    val clipFrames = features.size / MFCC_FEATURES
+    return usable.map { reference ->
+        val refFrames = reference.size / MFCC_FEATURES
+        val positions = kotlin.math.abs(clipFrames - refFrames) + 1
+        confirmingWindows(features, reference, threshold) to
+            kotlin.math.min(MIN_CONFIRMING_WINDOWS, positions)
+    }
+}
+
+/**
+ * The same agreement as "confirmed/bound" per reference, in enrollment order.
+ */
+fun wakeAgreement(features: FloatArray, references: List<FloatArray>, sensitivity: Float): List<String> {
+    val usable = references.filter { it.size >= MFCC_FEATURES && it.size % MFCC_FEATURES == 0 }
+    if (features.isEmpty() || usable.isEmpty()) return emptyList()
+    return agreement(features, usable, wakeCostThreshold(sensitivity, references))
+        .map { "${it.first}/${it.second}" }
+}
+
+/**
+ * Band-limited dynamic time warping between [length] frames of [features]
+ * starting at [start] and [reference], normalised by the length of the two
+ * sequences.
+ *
+ * The band bounds the warping path to [BAND_SIZE] frames of the diagonal,
+ * widened enough to absorb a length difference between the two sequences.
+ * Without it a short reference can be stretched across an unrelated clip and
+ * still find a cheap path, which is how a windowed match would otherwise trade
+ * the recall it buys for false triggers.
+ *
+ * [limit] prunes the search: costs only ever grow along a path, so a row whose
+ * cheapest cell already exceeds a cost known to be good enough cannot answer
+ * better than it.
+ */
+private fun windowCost(features: FloatArray, start: Int, length: Int, reference: FloatArray, limit: Float): Float {
+    val m = reference.size / MFCC_FEATURES
+    if (length == 0 || m == 0) return Float.MAX_VALUE
 
     val inf = Float.MAX_VALUE / 4.0f
+    // The band has to reach the bottom-right corner, not just the diagonal: at
+    // the last row the reachable columns stop at row + band, so a length
+    // difference of exactly BAND_SIZE leaves column m one step out of reach and
+    // the warp reports no path at all instead of its cost.
+    val band = kotlin.math.max(BAND_SIZE, kotlin.math.abs(length - m)) + 1
+    val cutoff = if (limit >= inf) inf else limit * (length + m)
+
     var previous = FloatArray(m + 1)
     var current = FloatArray(m + 1)
     previous[0] = 0.0f
-    for (col in 1..m) previous[col] = inf
+    // Reachable columns of the row above, so out-of-band cells are never read.
+    var prevLo = 0
+    var prevHi = 0
 
-    for (row in 1..n) {
-        current[0] = inf
-        for (col in 1..m) {
-            val local = euclidean(a, (row - 1) * MFCC_FEATURES, b, (col - 1) * MFCC_FEATURES)
-            val bestPrevious = kotlin.math.min(
-                kotlin.math.min(previous[col], previous[col - 1]),
-                current[col - 1]
-            )
-            current[col] = local + bestPrevious
+    for (row in 1..length) {
+        val lo = kotlin.math.max(1, row - band)
+        val hi = kotlin.math.min(m + 1, row + band)
+        if (lo >= hi) return Float.MAX_VALUE
+
+        var cheapest = inf
+        for (col in lo..<hi) {
+            var bestPrevious = inf
+            if (col >= prevLo && col <= prevHi) bestPrevious = previous[col]
+            if (col - 1 >= prevLo && col - 1 <= prevHi) bestPrevious = kotlin.math.min(bestPrevious, previous[col - 1])
+            if (col - 1 >= lo) bestPrevious = kotlin.math.min(bestPrevious, current[col - 1])
+            val value = frameDistance(
+                features,
+                (start + row - 1) * MFCC_FEATURES,
+                reference,
+                (col - 1) * MFCC_FEATURES
+            ) + bestPrevious
+            current[col] = value
+            if (value < cheapest) cheapest = value
         }
+        if (cheapest >= cutoff) return Float.MAX_VALUE
+
         val swap = previous
         previous = current
         current = swap
+        prevLo = lo
+        prevHi = hi - 1
     }
-    return previous[m] / (n + m)
+
+    if (m < prevLo || m > prevHi) return Float.MAX_VALUE
+    return previous[m] / (length + m)
 }
 
-private fun euclidean(a: FloatArray, aOffset: Int, b: FloatArray, bOffset: Int): Float {
-    var sum = 0.0f
+/**
+ * Distance between two feature frames: the Euclidean distance once each frame
+ * is scaled to unit length.
+ *
+ * Only the direction of a frame's cepstral signature carries its shape, so
+ * scaling each frame before comparing it removes the residual loudness that
+ * survives the clip-wide gain normalisation - a phrase spoken closer to the
+ * microphone is a little louder than the enrolled take of it. Expressing the
+ * cosine distance as a Euclidean one keeps the result in [0, 2], the same
+ * ballpark the thresholds below are calibrated to.
+ */
+private fun frameDistance(a: FloatArray, aOffset: Int, b: FloatArray, bOffset: Int): Float {
+    var dot = 0.0f
+    var magnitudeA = 0.0f
+    var magnitudeB = 0.0f
     for (k in 0..<MFCC_FEATURES) {
-        val d = a[aOffset + k] - b[bOffset + k]
-        sum += d * d
+        val x = a[aOffset + k]
+        val y = b[bOffset + k]
+        dot += x * y
+        magnitudeA += x * x
+        magnitudeB += y * y
     }
-    return kotlin.math.sqrt(sum)
+    if (magnitudeA < 1.0e-9f || magnitudeB < 1.0e-9f) {
+        // A frame with no signal has no direction to compare, so it matches
+        // nothing - except another frame with no signal, which is the same thing.
+        return if (magnitudeA < 1.0e-9f && magnitudeB < 1.0e-9f) 0.0f else 2.0f
+    }
+    val cosine = dot / kotlin.math.sqrt(magnitudeA * magnitudeB)
+    return kotlin.math.sqrt(kotlin.math.max(0.0f, 2.0f * (1.0f - cosine)))
+}
+
+/**
+ * Reduces the per-reference costs to the one cost of the clip.
+ *
+ * The best of the references is the most permissive reading, and it becomes
+ * more permissive as the user enrolls more takes: with enough of them, one of
+ * them flatters any clip. Taking the median from three references on means a
+ * genuine take still wins - it matches most of the user's own takes - while a
+ * clip that only flatters a single reference no longer counts.
+ */
+private fun aggregateCost(costs: List<Float>): Float {
+    val usable = costs.filter { it.isFinite() }.sorted()
+    if (usable.isEmpty()) return Float.MAX_VALUE
+    val index = kotlin.math.min(
+        usable.size - 1,
+        (REFERENCE_PERCENTILE * (usable.size - 1)).toInt()
+    )
+    return usable[index]
 }
 
 /**
  * The cost a clip may have against the enrolled references and still count as
  * the wake word.
  *
- * The threshold is derived from the references themselves: their median pairwise
- * cost is how much the user's own takes of the same phrase already differ from
- * each other, so accepting up to a multiple of that spread needs no absolute
- * constant that would depend on volume, phrase length or microphone.
- * Sensitivity scales that multiple across the slider: the strict end asks for
- * better than the spread the user's own takes already show, the lenient end
- * accepts several times it.
+ * The frame distance is capped at 2 and the features are normalised per
+ * dimension, so this cost is already volume-, phrase-length- and microphone
+ * independent: an absolute constant is meaningful here, and it is what the
+ * reference implementations tune (rustpotter ships a fixed threshold rather than
+ * one derived from the enrolled material). Deriving the whole threshold from the
+ * references does not work on real speech - takes of different sentences sit
+ * around 0.6 apart while the phrase inside a longer clip reaches 0.18 and
+ * unrelated speech 0.49, so a spread-scaled multiple lands far off the boundary
+ * that actually separates them.
+ *
+ * The constant carries the boundary and sensitivity scales it across the slider;
+ * the measured enrollment spread is allowed to widen the result only a bounded
+ * amount, so takes that genuinely differ from each other buy some tolerance
+ * without handing the whole scale back.
  */
 fun wakeCostThreshold(sensitivity: Float, references: List<FloatArray>): Float {
     val clamped = kotlin.math.max(0.0f, kotlin.math.min(1.0f, sensitivity))
-    val factor = 0.6f + 2.4f * (1.0f - clamped)
-    return (referenceSpread(references) * factor).coerceAtLeast(MIN_MATCH_THRESHOLD)
+    // The slider spans a narrow band around the boundary because the boundary
+    // itself is already known: recall needs ~0.36 and precision gives back at
+    // ~0.55, so the whole range has to live inside that 0.19-wide gap.
+    val factor = 0.925f + 0.175f * (1.0f - clamped)
+    val allowance = kotlin.math.min(referenceSpread(references), 1.0f) * SPREAD_ALLOWANCE
+    return (MATCH_COST * factor + allowance).coerceAtLeast(MIN_MATCH_THRESHOLD)
 }
 
 /**
- * Median pairwise DTW cost among the enrolled references - the spread the user's
- * own takes of the phrase already show. Below two references there is nothing to
- * measure, so a single reference falls back to a fixed cost in normalised units.
+ * Median pairwise cost among the enrolled references - the spread the user's
+ * own takes of the same phrase already show.
+ *
+ * It is measured with the same comparison a live clip goes through, so the
+ * threshold stays calibrated to the distance function and the normalisation in
+ * use and carries no absolute constant that would depend on volume, phrase
+ * length or microphone. Below two references there is nothing to measure, so a
+ * single reference falls back to a fixed cost in the same units.
  */
 private fun referenceSpread(references: List<FloatArray>): Float {
-    val usable = references.filter { it.isNotEmpty() }
+    val usable = references.filter { it.size >= MFCC_FEATURES && it.size % MFCC_FEATURES == 0 }
     if (usable.size < 2) return SINGLE_REFERENCE_SPREAD
 
     val costs = mutableListOf<Float>()
     for (i in usable.indices) {
         for (j in (i + 1)..<usable.size) {
-            val cost = dtwCost(usable[i], usable[j])
+            val frames = usable[i].size / MFCC_FEATURES
+            val cost = windowCost(usable[i], 0, frames, usable[j], Float.MAX_VALUE)
             if (cost.isFinite()) costs.add(cost)
         }
     }
@@ -437,8 +695,12 @@ private fun referenceSpread(references: List<FloatArray>): Float {
  * Returns an empty list when nothing has been recorded yet.
  */
 fun loadWakeReferences(context: Context): List<FloatArray> {
-    val file = java.io.File(pathForReferences(context))
-    if (!file.exists()) return emptyList()
+    val path = pathForReferences(context)
+    val file = java.io.File(path)
+    if (!file.exists()) {
+        Log.w("WakeEnroll", "No enrollment file at $path")
+        return emptyList()
+    }
     return try {
         val lines = file.readText().split('\n')
         val references = mutableListOf<FloatArray>()
@@ -447,6 +709,16 @@ fun loadWakeReferences(context: Context): List<FloatArray> {
             val parts = line.split(' ')
             if (parts.size < 2) continue
             val values = parts.drop(1).mapNotNull { it.toFloatOrNull() }
+            // A reference has to be a whole number of frames. Dropping an
+            // unparseable token shifts everything after it, and a shifted
+            // reference still loads - it just fails every consumer's frame
+            // check, which reads back as an enrollment that matches nothing at
+            // any sensitivity. Rejecting it here keeps the count the screen
+            // shows and the count the matcher can use the same number.
+            if (values.size % MFCC_FEATURES != 0) {
+                Log.w("LocalAssistant", "Wake reference line is malformed: $parts.size values, expected a multiple of $MFCC_FEATURES")
+                continue
+            }
             if (values.isNotEmpty()) {
                 val reference = values.toFloatArray()
                 // Enrollment files written before the features were normalised hold
@@ -456,8 +728,14 @@ fun loadWakeReferences(context: Context): List<FloatArray> {
                 references += reference
             }
         }
+        // The read side has to name the path and the usable count the way the
+        // write side does: an enrollment file that exists but yields fewer usable
+        // lines than the screen claims is the difference between a matcher that
+        // was handed nothing and one the user believes is configured.
+        Log.w("WakeEnroll", "Loaded ${references.size} usable references from $path")
         references
-    } catch (_: Exception) {
+    } catch (exception: Exception) {
+        Log.e("WakeEnroll", "Enrollment file at $path could not be read", exception)
         emptyList()
     }
 }
@@ -506,9 +784,20 @@ private fun writeReferences(context: Context, references: List<FloatArray>): Boo
                 append('\n')
             }
         }
+        // The failure has to be visible: enrollment used to swallow whatever the
+        // write threw, which is exactly how a broken enrollment file went
+        // invisible - the screen kept showing the old count while every new take
+        // failed silently.
         file.writeText(text)
+        // Naming the resolved path on the way out is what makes the enrollment
+        // file findable from adb: a save that reports success but lands
+        // somewhere other than the path the screen later reads back is the
+        // difference between "the enrollment is broken" and "the enrollment is
+        // in a place nobody looks at".
+        Log.w("WakeEnroll", "Wrote ${references.size} references to ${pathForReferences(context)}")
         true
-    } catch (_: Exception) {
+    } catch (exception: Exception) {
+        Log.e("LocalAssistant", "Wake enrollment could not be written to ${pathForReferences(context)}", exception)
         false
     }
 }
