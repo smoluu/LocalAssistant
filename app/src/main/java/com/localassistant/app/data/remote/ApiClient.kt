@@ -8,6 +8,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.MultipartBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * HTTP client for OpenAI-compatible endpoints (LLM, STT, TTS).
@@ -61,6 +62,10 @@ object ApiClient {
      * When [stream] is true the SSE stream is always consumed, so the returned
      * content is the reassembled answer and never the raw event stream; [onChunk]
      * is optional and only decides whether deltas are forwarded while reading.
+     *
+     * [abortSignal] is raised by the caller to stop the answer mid-flight - the
+     * deltas read after it is raised are dropped, so the caller never sees an
+     * answer it has already interrupted.
      */
     suspend fun chatCompletion(
         baseUrl: String,
@@ -74,6 +79,7 @@ object ApiClient {
         reasoningBudgetTokens: Int = 0,
         chatTemplateKwargs: String = "",
         timeoutSeconds: Long = DEFAULT_TIMEOUT,
+        abortSignal: AtomicBoolean? = null,
         onChunk: ((String) -> Unit)? = null
     ): ChatResponse {
         android.util.Log.d("ApiClient", "chatCompletion called, stream=$stream")
@@ -115,7 +121,7 @@ object ApiClient {
                     
                     if (stream) {
                         android.util.Log.d("ApiClient", "Using streaming response handler")
-                        handleStreamingResponse(body, onChunk)
+                        handleStreamingResponse(body, onChunk, abortSignal)
                     } else {
                         android.util.Log.d("ApiClient", "Using non-streaming response")
                         val content = body.string()
@@ -436,7 +442,8 @@ object ApiClient {
      */
     private suspend fun handleStreamingResponse(
         body: ResponseBody,
-        onChunk: ((String) -> Unit)?
+        onChunk: ((String) -> Unit)?,
+        abortSignal: AtomicBoolean? = null
     ): ChatResponse {
         val contentBuilder = StringBuilder()
         val reasoningBuilder = StringBuilder()
@@ -447,6 +454,10 @@ object ApiClient {
             val reader = java.io.BufferedReader(java.io.InputStreamReader(body.byteStream()))
             var lineCount = 0
             while (true) {
+                if (abortSignal?.get() == true) {
+                    android.util.Log.w("ApiClient", "SSE stream abandoned after $lineCount lines - the caller interrupted the answer")
+                    break
+                }
                 val line = reader.readLine()
                 if (line == null) {
                     android.util.Log.d("ApiClient", "SSE stream ended after $lineCount lines")

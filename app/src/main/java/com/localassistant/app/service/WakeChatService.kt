@@ -194,6 +194,16 @@ class WakeChatService : VoiceInteractionService() {
     // its silence cap before the card can be raised.
     private val wakeAbortSignal = AtomicBoolean(false)
 
+    // Raised while a turn is in flight when the user says the phrase again: the
+    // answer stops being thought and the reply stops being spoken, so the
+    // interruption takes over instead of queueing behind the reply.
+    private val wakeInterruptSignal = AtomicBoolean(false)
+
+    // Asks the beside-the-turn recorder to let go of the microphone. The platform
+    // hosts one AudioRecord at a time, so this is raised and the watcher awaited
+    // before the next turn opens its own window.
+    private val bargeInAbortSignal = AtomicBoolean(false)
+
     @Volatile
     private var listening = false
 
@@ -367,6 +377,13 @@ class WakeChatService : VoiceInteractionService() {
         listening = false
         stopSignal.set(true)
         wakeAbortSignal.set(true)
+        // The mid-turn watcher is holding the microphone when a stop arrives
+        // between turns, so it has to be told to let go as well - otherwise the
+        // next exchange opens a second recorder beside the one still running.
+        bargeInAbortSignal.set(true)
+        // A stale interrupt must not carry into the next exchange and cut its first
+        // reply short.
+        wakeInterruptSignal.set(false)
         // Stopping the service closes the chat, so its history goes with it -
         // a wake chat never carries a conversation into the next exchange.
         endExchange()
@@ -524,6 +541,56 @@ class WakeChatService : VoiceInteractionService() {
         return true
     }
 
+    /**
+     * Hold the microphone beside an in-flight turn so a second wake phrase can cut
+     * that turn short rather than queue behind it.
+     *
+     * The phrase is matched on-device exactly as the idle pass does it, so the
+     * interruption cannot be triggered by the assistant's own reply being
+     * transcribed - only by the enrolled voice saying the phrase.
+     *
+     * One window is not enough: a quiet room ends a window in a few seconds while a
+     * turn may run for tens of them, so the watcher refills its window until the
+     * caller raises [bargeInAbortSignal]. That keeps the microphone live across the
+     * whole turn - the LLM call *and* the reply being voiced - which is what lets a
+     * phrase said over a spoken reply cut it short.
+     *
+     * @return whether the phrase was heard.
+     */
+    private suspend fun bargeInWatcher(
+        currentSettings: com.localassistant.app.domain.model.AppSettings
+    ): Boolean {
+        while (!bargeInAbortSignal.get()) {
+            val clip = withContext(Dispatchers.IO) {
+                recordAudioWithVAD(
+                    context = appContext,
+                    stopSignal = bargeInAbortSignal,
+                    maxSeconds = WAKE_CLIP_SECONDS,
+                    noSpeechTimeoutMs = WAKE_IDLE_SECONDS * 1000L
+                )
+            }
+            // The caller released the watcher, or the window timed out - either way
+            // there is nothing to match, and the loop re-checks the release before
+            // opening another window.
+            if (clip == null || clip.isEmpty()) continue
+
+            val references = loadWakeReferences(appContext)
+            if (references.isEmpty()) continue
+
+            val features = extractWakeFeatures(clip)
+            if (!wakeWordHeard(features, references, currentSettings.wakeWordSensitivity)) continue
+
+            wakeInterruptSignal.set(true)
+            android.util.Log.w(
+                "WakeChatService",
+                "Wake phrase heard mid-turn: clip ${referenceFrameCount(features)} frames, " +
+                    "threshold ${formatCost(wakeCostThreshold(currentSettings.wakeWordSensitivity, references))}"
+            )
+            return true
+        }
+        return false
+    }
+
     private suspend fun wakeLoop() {
         while (listening) {
             var currentSettings = settingsRepository.settingsFlow.value
@@ -593,6 +660,11 @@ class WakeChatService : VoiceInteractionService() {
                     _phase.value = PHASE_LISTENING
                     updateNotification(getPhaseText(PHASE_LISTENING))
                     requestSession(SESSION_STATE_LISTENING, lastRequest, lastReply)
+                    // The chime belongs to the microphone, not to the first turn: it
+                    // is what tells the user a follow-up is being heard. Without it
+                    // a continuous conversation is silent about having re-armed, and
+                    // the user has to guess whether to speak.
+                    playWakeCue()
                 }
                 firstTurn = false
                 // The window is the user's setting: enough time to say the request,
@@ -610,7 +682,11 @@ class WakeChatService : VoiceInteractionService() {
                     )
                 }
                 if (!listening) break
-                val request = if (requestClip == null || requestClip.isEmpty()) {
+                // Whether the window holds speech at all, kept apart from whether
+                // that speech became usable words: the two end the conversation
+                // differently, and only one of them is silence.
+                val heardSomething = requestClip != null && requestClip.isNotEmpty()
+                val request = if (!heardSomething) {
                     ""
                 } else {
                     // A request clip that only holds whisper.cpp's bracketed markers is
@@ -620,19 +696,40 @@ class WakeChatService : VoiceInteractionService() {
                 }
 
                 if (request.isBlank()) {
-                    // Nothing was heard within the window, which is the end of the
-                    // conversation rather than a failed turn. The reason is shown
-                    // for a readable beat and then the card closes: holding it up
-                    // for the whole close window here would make a silent room look
-                    // like an assistant that is still waiting for a request.
                     _statusMessage.value = "Could not hear the request"
                     updateNotification("Could not hear the request")
-                    holdWhileQuiet(CLOSED_HINT_MS)
-                    break
+                    if (!heardSomething) {
+                        // Nothing at all inside the window is the end of the
+                        // conversation rather than a failed turn. The reason is shown
+                        // for a readable beat and then the card closes: holding it up
+                        // for the whole close window here would make a silent room look
+                        // like an assistant that is still waiting for a request.
+                        holdWhileQuiet(CLOSED_HINT_MS)
+                        break
+                    }
+                    // Speech was heard but it is not usable words - the marker-only
+                    // transcript whisper.cpp answers with, or a clip that is all noise.
+                    // The user is mid-conversation and clearly still talking, so this
+                    // is a failed turn, not the end of one: closing here would end a
+                    // conversation on the first mumbled request. The reason is shown
+                    // and the microphone is re-armed under the user's close window,
+                    // which is what ends the conversation if they really have stopped.
+                    silenceWindowMs = currentSettings.wakeChatCloseSeconds.coerceIn(1, 300) * 1000L
+                    continue
                 }
 
                 lastRequest = request
                 lastReply = answer(request, currentSettings)
+                if (wakeInterruptSignal.get()) {
+                    // The user said the phrase during this turn, so the turn is over
+                    // and the next one starts straight away: waiting for silence here
+                    // would make an interruption look like the end of the
+                    // conversation. The window is the fresh "just heard the phrase"
+                    // one, not the close window.
+                    silenceWindowMs = currentSettings.wakeReplySeconds.coerceIn(1, 300) * 1000L
+                    delay(MIC_REARM_MS)
+                    continue
+                }
                 // The reply has just been voiced through speakers beside the
                 // microphone, so the mic is given a beat before it is live again -
                 // otherwise the tail of that reply becomes the next question.
@@ -668,8 +765,27 @@ class WakeChatService : VoiceInteractionService() {
         // produced.
         requestSession(SESSION_STATE_REQUEST, request, "")
 
-        val reply = complete(currentSettings, request)
-        if (reply.isNotBlank()) {
+        // A second wake phrase heard while this turn is in flight cuts it short, so
+        // the microphone is held beside the LLM and the speakers rather than only
+        // between turns. The flags are cleared per turn: a previous interruption
+        // must not be read as a current one.
+        wakeInterruptSignal.set(false)
+        bargeInAbortSignal.set(false)
+        // The watcher is a child of the listening scope, so it is cancelled with
+        // the service. Its own failure must not cancel that scope, because an
+        // interrupted recording is not the end of the assistant's whole session.
+        val interruptWatcher = serviceScope.async {
+            try {
+                bargeInWatcher(currentSettings)
+            } catch (e: Exception) {
+                android.util.Log.w("WakeChatService", "Barge-in watcher failed: ${e.message}")
+                false
+            }
+        }
+
+        val reply = complete(currentSettings, request, wakeInterruptSignal)
+
+        if (reply.isNotBlank() && !wakeInterruptSignal.get()) {
             _messages.update { current ->
                 current + listOf(ChatMessage.assistant(reply))
             }
@@ -699,12 +815,29 @@ class WakeChatService : VoiceInteractionService() {
                 voice = currentSettings.ttsVoiceName,
                 responseFormat = currentSettings.ttsResponseFormat,
                 enableStreaming = currentSettings.enableTtsStreaming,
-                timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
+                timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong(),
+                // The phrase can be said again while the reply is still being
+                // voiced, and the rest of it must not keep talking over the user.
+                abortSignal = wakeInterruptSignal
             )
             // The reply has been spoken, so the card settles on the two bubbles
             // with no status label - a settled exchange is just the conversation.
             requestSession(SESSION_STATE_REPLY, request, reply)
+        } else if (wakeInterruptSignal.get()) {
+            // The turn was cut short, so the half an answer that arrived is not
+            // kept as a reply the user never heard, and nothing is spoken over the
+            // phrase they are already saying.
+            android.util.Log.w(
+                "WakeChatService",
+                "Turn interrupted by the wake word - ${reply.length} chars of answer dropped"
+            )
         }
+        // The platform hosts one microphone at a time, so the beside-the-turn
+        // recorder has to have let go before the next turn opens its own window.
+        // It is released here rather than right after the LLM call so the phrase can
+        // still be said over a reply that is being voiced.
+        bargeInAbortSignal.set(true)
+        interruptWatcher.await()
         return reply
     }
 
@@ -810,7 +943,8 @@ class WakeChatService : VoiceInteractionService() {
      */
     private suspend fun complete(
         currentSettings: com.localassistant.app.domain.model.AppSettings,
-        request: String
+        request: String,
+        abortSignal: java.util.concurrent.atomic.AtomicBoolean? = null
     ): String {
         // The service runs hands-free all day, so only the latest turns are sent -
         // an unbounded history would eventually overflow the model's context.
@@ -848,7 +982,10 @@ class WakeChatService : VoiceInteractionService() {
                         }
                     }
                 },
-                timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong()
+                timeoutSeconds = currentSettings.httpTimeoutSeconds.toLong(),
+                // The phrase can be said again while the answer is still being
+                // thought, and the deltas after it are not wanted any more.
+                abortSignal = abortSignal
             ).content
         } catch (e: Exception) {
             android.util.Log.w("WakeChatService", "LLM failed: ${e.message}")
