@@ -32,7 +32,10 @@ data class AppSettings(
     val ttsVoiceName: String = "serena",
     val ttsApiKey: String = "",
     val ttsResponseFormat: String = "mp3",
-    val enableTtsStreaming: Boolean = false,
+    // A whole-reply synthesis costs the server seconds before a single word is audible,
+    // so the default is the per-sentence path: the first sentence plays while the next
+    // is still being synthesized.
+    val enableTtsStreaming: Boolean = true,
     
     // System Prompt
     val systemPrompt: String = """You are LocalAssistant, running on the user's Android device.

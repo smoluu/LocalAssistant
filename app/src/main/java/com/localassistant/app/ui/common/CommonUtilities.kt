@@ -5,12 +5,12 @@ import android.content.Intent
 import android.media.AudioFormat
 import android.media.MediaRecorder
 import android.widget.Toast
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.*
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Writes a 32-bit integer to the output stream in little-endian byte order.
@@ -427,9 +427,11 @@ fun parseWavBytes(data: ByteArray): Pair<Int, ByteArray>? {
  *
  * @param pcmBytes Raw little-endian 16-bit mono PCM samples.
  * @param sampleRate Preferred sample rate of the PCM data.
+ * @param abortSignal Raised while playing - the samples stop being written, so the
+ *   wake word can take over mid-reply.
  * @return true if any audio was played.
  */
-fun playPcmAudio(pcmBytes: ByteArray, sampleRate: Int): Boolean {
+fun playPcmAudio(pcmBytes: ByteArray, sampleRate: Int, abortSignal: AtomicBoolean? = null): Boolean {
     if (pcmBytes.isEmpty()) return false
 
     val preferredRate = if (sampleRate in 8000..96000) sampleRate else 22050
@@ -470,6 +472,10 @@ fun playPcmAudio(pcmBytes: ByteArray, sampleRate: Int): Boolean {
             audioTrack.play()
             var totalWritten = 0
             while (totalWritten < pcmBytes.size) {
+                if (abortSignal?.get() == true) {
+                    android.util.Log.d("TTS", "Samples stopped by the wake word (written=$totalWritten)")
+                    break
+                }
                 val remaining = pcmBytes.size - totalWritten
                 val toWrite = minOf(remaining, 32768)
                 val written = audioTrack.write(pcmBytes, totalWritten, toWrite)
@@ -553,6 +559,8 @@ fun splitIntoSentences(text: String): List<String> {
  * @param voice Voice name from settings.
  * @param enableStreaming Whether to use streaming TTS playback.
  * @param timeoutSeconds HTTP timeout for each synthesis request, from the app settings.
+ * @param abortSignal Raised while the reply is being spoken - the wake word cut the
+ *   exchange short, so the rest of the audio is dropped rather than played.
  */
  suspend fun playTTSAudio(
      text: String?,
@@ -561,31 +569,52 @@ fun splitIntoSentences(text: String): List<String> {
      voice: String? = null,
      responseFormat: String = "mp3",
      enableStreaming: Boolean = false,
-     timeoutSeconds: Long
+     timeoutSeconds: Long,
+     abortSignal: AtomicBoolean? = null
  ) {
      if (text == null || ttsSettings?.first == null) {
          return
      }
- 
+
      val cleanText = text.trim()
      if (cleanText.isEmpty()) {
          return
      }
- 
+
      val ttsBaseUrl = ttsSettings.first!!
      val ttsApiKey = ttsSettings.second?.takeIf { it.isNotBlank() }
 
      // Streaming playback: synthesize and speak one sentence at a time, so audio
      // starts before the whole reply is ready. The local TTS proxies have no SSE
      // route, so the chunking happens here against the plain /audio/speech call.
+     //
+     // The synthesis is the expensive half - the local server costs a beat per
+     // sentence - so the next sentence is requested while the current one is still
+     // playing. A request that waited for the previous sentence to finish playing
+     // leaves that beat as silence the user can hear between sentences.
      if (enableStreaming) {
          val sentences = splitIntoSentences(cleanText)
          if (sentences.size > 1) {
              var played = false
-             for (sentence in sentences) {
-                 val chunk = fetchTtsAudio(ttsBaseUrl, ttsApiKey, sentence, model, voice, responseFormat, timeoutSeconds)
-                     ?: fetchTtsAudio(ttsBaseUrl, ttsApiKey, sentence, model, null, responseFormat, timeoutSeconds)
-                 if (chunk != null && chunk.isNotEmpty() && playAudioBytes(chunk)) {
+             val fetchScope = CoroutineScope(Dispatchers.Default + Job())
+             var pending = fetchScope.async {
+                 fetchTtsAudio(ttsBaseUrl, ttsApiKey, sentences[0], model, voice, responseFormat, timeoutSeconds)
+                     ?: fetchTtsAudio(ttsBaseUrl, ttsApiKey, sentences[0], model, null, responseFormat, timeoutSeconds)
+             }
+             for (index in sentences.indices) {
+                 val chunk = pending.await()
+                 if (index + 1 < sentences.size) {
+                     val next = sentences[index + 1]
+                     pending = fetchScope.async {
+                         fetchTtsAudio(ttsBaseUrl, ttsApiKey, next, model, voice, responseFormat, timeoutSeconds)
+                             ?: fetchTtsAudio(ttsBaseUrl, ttsApiKey, next, model, null, responseFormat, timeoutSeconds)
+                     }
+                 }
+                 if (abortSignal?.get() == true) {
+                     android.util.Log.d("TTS", "Playback cut short by the wake word")
+                     return
+                 }
+                 if (chunk != null && chunk.isNotEmpty() && playAudioBytes(chunk, abortSignal)) {
                      played = true
                  }
              }
@@ -606,7 +635,7 @@ fun splitIntoSentences(text: String): List<String> {
              return
          }
 
-         if (playAudioBytes(audioBytes)) return
+         if (playAudioBytes(audioBytes, abortSignal)) return
 
          // Some endpoints advertise mp3 but only produce a container this device can
          // decode as wav, so retry once in the format the player is known to handle.
@@ -614,7 +643,7 @@ fun splitIntoSentences(text: String): List<String> {
              android.util.Log.w("TTS", "Could not play $responseFormat, retrying as wav")
              val wav = fetchTtsAudio(ttsBaseUrl, ttsApiKey, cleanText, model, null, "wav", timeoutSeconds)
              if (wav != null && wav.isNotEmpty()) {
-                 playAudioBytes(wav)
+                 playAudioBytes(wav, abortSignal)
              }
          }
      } catch (e: Exception) {
@@ -765,9 +794,11 @@ fun isNonSpeechTranscript(text: String): Boolean {
  * PCM and played via AudioTrack; other containers (MP3, OGG, FLAC) are decoded
  * via MediaCodec and played via AudioTrack.
  *
+ * @param abortSignal Raised while playing - the audio is cut short rather than
+ *   played to the end, so the wake word can take over mid-reply.
  * @return true if audio was played.
  */
-suspend fun playAudioBytes(data: ByteArray): Boolean {
+suspend fun playAudioBytes(data: ByteArray, abortSignal: AtomicBoolean? = null): Boolean {
     android.util.Log.e("TTS", "playAudioBytes: size=${data.size}")
     if (data.isEmpty()) return false
 
@@ -782,13 +813,13 @@ suspend fun playAudioBytes(data: ByteArray): Boolean {
         if (parsed == null) {
             // MediaCodec understands the RIFF container too, so decode it instead of
             // playing the header bytes as PCM at a guessed rate.
-            return playMp3Audio(data)
+            return playMp3Audio(data, abortSignal)
         }
-        return playPcmAudio(parsed.second, parsed.first)
+        return playPcmAudio(parsed.second, parsed.first, abortSignal)
     }
 
     // MP3 / OGG / FLAC / other - decode via MediaCodec and play via AudioTrack.
-    return playMp3Audio(data)
+    return playMp3Audio(data, abortSignal)
 }
 
 /**
@@ -799,7 +830,7 @@ suspend fun playAudioBytes(data: ByteArray): Boolean {
  *
  * @return true if audio was played.
  */
- private suspend fun playMp3Audio(data: ByteArray): Boolean =
+ private suspend fun playMp3Audio(data: ByteArray, abortSignal: AtomicBoolean? = null): Boolean =
      withContext(Dispatchers.IO) {
          android.util.Log.e("TTS", "playMp3Audio: size=${data.size}")
          val firstBytes = data.take(12).joinToString(" ") { String.format("%02x", it) }
@@ -871,59 +902,58 @@ suspend fun playAudioBytes(data: ByteArray): Boolean {
             codec.start()
             android.util.Log.e("TTS", "Codec started, data.size=${data.size}")
 
-            // Feed the MP3 bytes into the decoder's input buffer.
-            var offset = 0
-            var feedCount = 0
-            while (offset < data.size) {
-                val inputIndex = codec.dequeueInputBuffer(10000)
-                if (inputIndex < 0) {
-                    android.util.Log.w("TTS", "No input buffer available (feedCount=$feedCount)")
-                    break
-                }
-                val inputBuffer = codec.getInputBuffer(inputIndex) ?: run {
-                    android.util.Log.e("TTS", "Input buffer $inputIndex is null")
-                    break
-                }
-                inputBuffer.clear()
-                val maxLen = minOf(inputBuffer.capacity(), data.size - offset)
-                inputBuffer.put(data, offset, maxLen)
-                val flags = if (offset + maxLen >= data.size) android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0
-                codec.queueInputBuffer(inputIndex, maxLen, 0, 0L, flags)
-                offset += maxLen
-                feedCount++
-            }
-            android.util.Log.e("TTS", "Input feeding complete: offset=$offset feedCount=$feedCount")
-
-            // Decode loop: pull PCM out of the decoder and write it to AudioTrack.
+            // Feed and drain in the same loop. The decoder's input queue is only a
+            // handful of buffers deep, so pushing the whole reply first stalls it:
+            // dequeueInputBuffer answers "queue full" partway through and the rest of
+            // the payload never reaches the decoder, which is what made a long mp3 reply
+            // play as silence.
             track.play()
-            android.util.Log.e("TTS", "Track playing, starting decode loop")
+            android.util.Log.e("TTS", "Track playing, starting feed/decode loop")
             val bufInfo = android.media.MediaCodec.BufferInfo()
             val outBuf = ByteArray(8192)
+            var offset = 0
+            var feedCount = 0
             var done = false
             var idleSpins = 0
             var totalWritten = 0
             while (!done) {
+                if (abortSignal?.get() == true) {
+                    android.util.Log.d("TTS", "Decoding cut short by the wake word (written=$totalWritten)")
+                    break
+                }
+                if (offset < data.size) {
+                    val inputIndex = codec.dequeueInputBuffer(10000)
+                    if (inputIndex >= 0) {
+                        val inputBuffer = codec.getInputBuffer(inputIndex)
+                        if (inputBuffer != null) {
+                            inputBuffer.clear()
+                            val maxLen = minOf(inputBuffer.capacity(), data.size - offset)
+                            inputBuffer.put(data, offset, maxLen)
+                            val flags = if (offset + maxLen >= data.size) android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM else 0
+                            codec.queueInputBuffer(inputIndex, maxLen, 0, 0L, flags)
+                            offset += maxLen
+                            feedCount++
+                        }
+                    }
+                }
                 val idx = codec.dequeueOutputBuffer(bufInfo, 1000)
-                android.util.Log.e("TTS", "dequeue idx=$idx size=${bufInfo.size} flags=${bufInfo.flags} idle=$idleSpins")
                 if (idx >= 0) {
                     if (bufInfo.size > 0 &&
                         (bufInfo.flags and android.media.MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
                     ) {
-                        val ob = codec.getOutputBuffer(idx) ?: run {
-                            codec.releaseOutputBuffer(idx, false)
-                            continue
+                        val ob = codec.getOutputBuffer(idx)
+                        if (ob != null) {
+                            ob.position(bufInfo.offset)
+                            ob.limit(bufInfo.offset + bufInfo.size)
+                            var pos = 0
+                            while (pos < bufInfo.size) {
+                                val chunk = minOf(outBuf.size, bufInfo.size - pos)
+                                ob.get(outBuf, 0, chunk)
+                                track.write(outBuf, 0, chunk)
+                                pos += chunk
+                            }
+                            totalWritten += bufInfo.size
                         }
-                        ob.position(bufInfo.offset)
-                        ob.limit(bufInfo.offset + bufInfo.size)
-                        var pos = 0
-                        while (pos < bufInfo.size) {
-                            val chunk = minOf(outBuf.size, bufInfo.size - pos)
-                            ob.get(outBuf, 0, chunk)
-                            track.write(outBuf, 0, chunk)
-                            pos += chunk
-                        }
-                        totalWritten += bufInfo.size
-                        android.util.Log.e("TTS", "Wrote ${bufInfo.size} bytes (total=$totalWritten)")
                     }
                     codec.releaseOutputBuffer(idx, false)
                     if ((bufInfo.flags and android.media.MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
@@ -932,17 +962,29 @@ suspend fun playAudioBytes(data: ByteArray): Boolean {
                     idleSpins = 0
                 } else {
                     idleSpins++
-                    if (idleSpins > 20) break
+                    if (idleSpins > 200) break
                 }
             }
+            android.util.Log.e(
+                "TTS",
+                "Feed/decode finished: fed=$offset/${data.size} bytes, chunks=$feedCount, pcm=$totalWritten"
+            )
 
             track.flush()
             track.stop()
             track.release()
             codec.stop()
             codec.release()
-            android.util.Log.d("TTS", "Played ${data.size} bytes via MediaCodec")
-            true
+            if (totalWritten == 0) {
+                // Nothing came out, so the caller must not read this as "played":
+                // reporting success here is what hides the failure from the wav
+                // fallback and leaves the user with a silent reply.
+                android.util.Log.e("TTS", "MediaCodec decoded nothing from ${data.size} bytes")
+                false
+            } else {
+                android.util.Log.d("TTS", "Played $totalWritten PCM bytes via MediaCodec")
+                true
+            }
         } catch (e: Exception) {
             android.util.Log.e("TTS", "MediaCodec playback failed: ${e.message}", e)
             false
